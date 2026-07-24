@@ -90,10 +90,20 @@ static void hideAuthMasks(UIView *view, int depth) {
                 }
             }
 
-            // 半透明黑色背景也是特征
-            BOOL isMaskStyle = (sv.alpha < 1.0 || 
-                                CGColorEqualToColor(sv.backgroundColor.CGColor, [UIColor blackColor].CGColor) ||
-                                sv.backgroundColor == nil);
+            // 半透明黑色背景也是特征 (不用 CGColorEqualToColor)
+            BOOL isMaskStyle = NO;
+            if (sv.alpha < 1.0) {
+                isMaskStyle = YES;
+            } else if (sv.backgroundColor) {
+                CGFloat r, g, b, a;
+                if ([sv.backgroundColor getRed:&r green:&g blue:&b alpha:&a]) {
+                    if (r < 0.1 && g < 0.1 && b < 0.1) {
+                        isMaskStyle = YES;
+                    }
+                }
+            } else {
+                isMaskStyle = YES; // nil background
+            }
 
             if (hasAuthElements || (isMaskStyle && isFullScreen)) {
                 LOG(@"Hiding auth mask: %@", sv);
@@ -149,7 +159,7 @@ static NSURLSessionDataTask *hook_dataTaskWithRequest(id self, SEL _cmd, NSURLRe
             });
         }
 
-        // 返回一个假的 task（从空 session 创建）
+        // 返回一个假的 task
         NSURLSession *emptySession = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
         NSURLSessionDataTask *fakeTask = [emptySession dataTaskWithURL:[NSURL URLWithString:@"http://localhost"]];
         return fakeTask;
