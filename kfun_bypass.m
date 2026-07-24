@@ -60,7 +60,6 @@ static void swizzleMethod(Class cls, SEL originalSel, SEL newSel)
 
 @end
 
-// dylib 入口
 __attribute__((constructor)) void tweak_init()
 {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -82,7 +81,7 @@ __attribute__((constructor)) void tweak_init()
         }
         
         if(!activationCls && !activVC){
-            NSLog(@"[KfunBypass] ⚠️ 未找到目标类名！二进制类名存在混淆，需要微调字符串");
+            NSLog(@"[KfunBypass] ⚠️ 未找到目标类！App存在类名混淆，后续需要重新dump真实类名替换");
         }
     });
 }
