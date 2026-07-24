@@ -1,191 +1,165 @@
 //
-//  iphook.m
-//  KFun Card Key Bypass - Pure Dylib
-//  注入方式: DYLD_INSERT_LIBRARIES 或 tweak 加载
+//  iphook.m - KFun 卡密验证 Bypass
+//  只 Hook 验证系统，不碰任何推流/网络功能
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <dlfcn.h>
-
-#pragma mark - 日志工具
 
 #define LOG(fmt, ...) NSLog(@"[IPH] " fmt, ##__VA_ARGS__)
 
-#pragma mark - 伪造响应数据
-
-static NSData *fakeAuthResponse(void) {
-    static NSData *data = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSString *json = @"{\"code\":0,\"msg\":\"success\",\"data\":{\"expire\":\"2099-12-31 23:59:59\",\"type\":\"lifetime\",\"uid\":\"bypassed\",\"token\":\"fake_token_12345\"}}";
-        data = [json dataUsingEncoding:NSUTF8StringEncoding];
-    });
-    return data;
+// ============================================================
+// 工具函数
+// ============================================================
+static void hookMethod(const char *className, SEL sel, IMP newImp, IMP *oldImp) {
+    Class cls = objc_getClass(className);
+    if (!cls) { LOG(@"找不到类: %s", className); return; }
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) { LOG(@"找不到方法: %s", sel_getName(sel)); return; }
+    if (oldImp) *oldImp = method_getImplementation(m);
+    method_setImplementation(m, newImp);
+    LOG(@"Hooked: %s -> %s", className, sel_getName(sel));
 }
 
-static NSHTTPURLResponse *fakeHTTPResponse(NSURL *url) {
-    return [[NSHTTPURLResponse alloc] initWithURL:url
-                                         statusCode:200
-                                        HTTPVersion:@"HTTP/1.1"
-                                       headerFields:@{@"Content-Type": @"application/json"}];
-}
-
-#pragma mark - 工具函数
-
-static BOOL isAuthURL(NSString *urlStr) {
-    if (!urlStr) return NO;
-    NSString *low = urlStr.lowercaseString;
-    NSArray *keywords = @[@"auth", @"verify", @"license", @"activate", @"check", @"login", 
-                           @"key", @"code", @"card", @"token", @"bind", @"machine", @"device"];
-    for (NSString *kw in keywords) {
-        if ([low containsString:kw]) return YES;
+static UIViewController *getTopVC() {
+    UIWindowScene *scene = nil;
+    for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) { scene = s; break; }
     }
-    return NO;
+    UIWindow *window = scene ? scene.keyWindow : [UIApplication sharedApplication].keyWindow;
+    UIViewController *vc = window.rootViewController;
+    if (!vc) return nil;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    if ([vc isKindOfClass:[UINavigationController class]])
+        vc = [(UINavigationController *)vc topViewController];
+    return vc;
 }
 
-static BOOL isAuthBody(NSData *body) {
-    if (!body) return NO;
-    NSString *str = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-    if (!str) return NO;
-    NSString *low = str.lowercaseString;
-    NSArray *keywords = @[@"auth", @"verify", @"license", @"activate", @"code", @"key", 
-                           @"card", @"token", @"udid", @"device", @"machine"];
-    for (NSString *kw in keywords) {
-        if ([low containsString:kw]) return YES;
+static void enterMain() {
+    UIViewController *vc = getTopVC();
+    if (!vc) return;
+    // 尝试各种可能的主界面入口
+    if ([vc respondsToSelector:@selector(enterMainConsole)]) {
+        ((void(*)(id, SEL))objc_msgSend)(vc, @selector(enterMainConsole));
+        return;
     }
-    return NO;
-}
-
-#pragma mark - 递归隐藏遮罩
-
-static void hideAuthMasks(UIView *view, int depth) {
-    if (depth > 20) return;
-
-    for (UIView *sv in view.subviews) {
-        CGRect frame = sv.frame;
-        CGSize screen = [UIScreen mainScreen].bounds.size;
-
-        // 检测全屏遮罩特征
-        BOOL isFullScreen = (frame.size.width >= screen.width * 0.9 &&
-                             frame.size.height >= screen.height * 0.9);
-
-        if (isFullScreen) {
-            // 检查是否包含验证元素
-            BOOL hasAuthElements = NO;
-            for (UIView *ssv in sv.subviews) {
-                if ([ssv isKindOfClass:[UITextField class]]) {
-                    hasAuthElements = YES;
-                    break;
-                }
-                if ([ssv isKindOfClass:[UIButton class]]) {
-                    UIButton *btn = (UIButton *)ssv;
-                    NSString *title = [btn titleForState:UIControlStateNormal];
-                    if ([title containsString:@"验证"] || [title containsString:@"激活"] ||
-                        [title containsString:@"登录"] || [title containsString:@"确定"]) {
-                        hasAuthElements = YES;
-                        break;
-                    }
-                }
-            }
-
-            // 半透明黑色背景也是特征 (不用 CGColorEqualToColor)
-            BOOL isMaskStyle = NO;
-            if (sv.alpha < 1.0) {
-                isMaskStyle = YES;
-            } else if (sv.backgroundColor) {
-                CGFloat r, g, b, a;
-                if ([sv.backgroundColor getRed:&r green:&g blue:&b alpha:&a]) {
-                    if (r < 0.1 && g < 0.1 && b < 0.1) {
-                        isMaskStyle = YES;
-                    }
-                }
-            } else {
-                isMaskStyle = YES; // nil background
-            }
-
-            if (hasAuthElements || (isMaskStyle && isFullScreen)) {
-                LOG(@"Hiding auth mask: %@", sv);
-                sv.hidden = YES;
-                sv.userInteractionEnabled = NO;
-                [sv removeFromSuperview];
-                continue;
-            }
+    if ([vc respondsToSelector:@selector(setupAfterActivation)]) {
+        ((void(*)(id, SEL))objc_msgSend)(vc, @selector(setupAfterActivation));
+        return;
+    }
+    // 遍历子控制器
+    for (UIViewController *child in vc.childViewControllers) {
+        if ([child respondsToSelector:@selector(enterMainConsole)]) {
+            ((void(*)(id, SEL))objc_msgSend)(child, @selector(enterMainConsole));
+            return;
         }
-
-        hideAuthMasks(sv, depth + 1);
+        if ([child respondsToSelector:@selector(setupAfterActivation)]) {
+            ((void(*)(id, SEL))objc_msgSend)(child, @selector(setupAfterActivation));
+            return;
+        }
     }
 }
 
-#pragma mark - 定时清理任务
+static void hideMask(id self) {
+    // 通过 KVC 获取 authMaskView
+    id mask = nil;
+    @try { mask = [self valueForKey:@"authMaskView"]; } @catch (NSException *e) {}
+    if (!mask) @try { mask = [self valueForKey:@"_authMaskView"]; } @catch (NSException *e) {}
 
-static void scheduleMaskCleanup(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *window in scene.windows) {
-                    if (window.isKeyWindow) {
-                        keyWindow = window;
-                        break;
-                    }
-                }
-            }
+    if (mask) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [mask setValue:@YES forKey:@"hidden"];
+            [(UIView *)mask setUserInteractionEnabled:NO];
+            [(UIView *)mask removeFromSuperview];
+            LOG(@"已移除遮罩");
+        });
+    }
+}
+
+// ============================================================
+// 伪造响应
+// ============================================================
+static NSDictionary *fakeAuthData() {
+    return @{
+        @"code": @0,
+        @"msg": @"success",
+        @"data": @{
+            @"expire": @"2099-12-31 23:59:59",
+            @"type": @"lifetime",
+            @"uid": @"bypassed"
         }
-        if (keyWindow) {
-            hideAuthMasks(keyWindow, 0);
-        }
-        // 每 3 秒检查一次
-        scheduleMaskCleanup();
+    };
+}
+
+// ============================================================
+// Hook 实现
+// ============================================================
+
+// 1. Hook activateCode:completion: - 核心验证入口
+static void hook_activateCode(id self, SEL _cmd, NSString *code, void (^completion)(BOOL, id)) {
+    LOG(@"Bypass activateCode: %@", code);
+
+    // 直接回调成功
+    if (completion) {
+        completion(YES, fakeAuthData());
+    }
+
+    // 触发成功 UI
+    if ([self respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+        ((void(*)(id, SEL, NSString *))objc_msgSend)(self, @selector(buildSuccessViewWithExpire:), @"2099-12-31 23:59:59");
+    }
+
+    // 进入主界面
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        hideMask(self);
+        enterMain();
     });
 }
 
-#pragma mark - NSURLSession Hook
-
-typedef NSURLSessionDataTask *(*orig_dataTaskWithRequest_t)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
-static orig_dataTaskWithRequest_t orig_dataTaskWithRequest = NULL;
-
-static NSURLSessionDataTask *hook_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completion)(NSData *, NSURLResponse *, NSError *)) {
-    NSURL *url = request.URL;
-    NSString *urlStr = url.absoluteString;
-
-    if (isAuthURL(urlStr) || isAuthBody(request.HTTPBody)) {
-        LOG(@"Intercepted auth request: %@", urlStr);
-
-        if (completion) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(fakeAuthResponse(), fakeHTTPResponse(url), nil);
-            });
-        }
-
-        // 返回一个假的 task
-        NSURLSession *emptySession = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
-        NSURLSessionDataTask *fakeTask = [emptySession dataTaskWithURL:[NSURL URLWithString:@"http://localhost"]];
-        return fakeTask;
-    }
-
-    return orig_dataTaskWithRequest(self, _cmd, request, completion);
+// 2. Hook verifyWithCompletion:
+static void hook_verifyWithCompletion(id self, SEL _cmd, void (^completion)(BOOL)) {
+    LOG(@"Bypass verifyWithCompletion");
+    if (completion) completion(YES);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        hideMask(self);
+        enterMain();
+    });
 }
 
-#pragma mark - NSURLConnection Hook (同步请求)
-
-typedef NSData *(*orig_sendSyncRequest_t)(Class, SEL, NSURLRequest *, NSURLResponse **, NSError **);
-static orig_sendSyncRequest_t orig_sendSyncRequest = NULL;
-
-static NSData *hook_sendSyncRequest(Class self, SEL _cmd, NSURLRequest *request, NSURLResponse **response, NSError **error) {
-    if (isAuthURL(request.URL.absoluteString) || isAuthBody(request.HTTPBody)) {
-        LOG(@"Intercepted sync auth request: %@", request.URL.absoluteString);
-        if (response) *response = fakeHTTPResponse(request.URL);
-        if (error) *error = nil;
-        return fakeAuthResponse();
-    }
-    return orig_sendSyncRequest(self, _cmd, request, response, error);
+// 3. Hook checkTask - 过期检查
+static void hook_checkTask(id self, SEL _cmd) {
+    // 空实现，永远通过
 }
 
-#pragma mark - 运行时扫描 Hook 验证类
+// 4. Hook onTapVerify - 按钮点击
+static void hook_onTapVerify(id self, SEL _cmd) {
+    LOG(@"Bypass onTapVerify");
+    if ([self respondsToSelector:@selector(activateCode:completion:)]) {
+        ((void(*)(id, SEL, NSString *, void (^)(BOOL, id)))objc_msgSend)(
+            self, @selector(activateCode:completion:), @"BYPASSED", ^(BOOL s, id d){});
+    }
+}
 
-static void hookAuthClasses(void) {
+// 5. Hook shakeField - 禁用错误动画
+static void hook_shakeField(id self, SEL _cmd) {
+    // 空实现
+}
+
+// 6. Hook authenticate: (备用)
+static void hook_authenticate(id self, SEL _cmd, id param) {
+    LOG(@"Bypass authenticate:");
+    if ([self respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+        ((void(*)(id, SEL, NSString *))objc_msgSend)(self, @selector(buildSuccessViewWithExpire:), @"2099-12-31 23:59:59");
+    }
+    hideMask(self);
+    enterMain();
+}
+
+// ============================================================
+// 运行时扫描 Hook
+// ============================================================
+static void scanAndHookAuthClasses() {
     int numClasses = objc_getClassList(NULL, 0);
     if (numClasses <= 0) return;
 
@@ -198,9 +172,10 @@ static void hookAuthClasses(void) {
         NSString *clsName = [NSString stringWithUTF8String:cname];
 
         // 跳过系统类
-        if ([clsName hasPrefix:@"NS"] || [clsName hasPrefix:@"UI"] || 
+        if ([clsName hasPrefix:@"NS"] || [clsName hasPrefix:@"UI"] ||
             [clsName hasPrefix:@"AV"] || [clsName hasPrefix:@"CA"] ||
-            [clsName hasPrefix:@"CG"] || [clsName hasPrefix:@"CF"]) {
+            [clsName hasPrefix:@"CG"] || [clsName hasPrefix:@"CF"] ||
+            [clsName hasPrefix:@"OS_"] || [clsName hasPrefix:@"__"]) {
             continue;
         }
 
@@ -216,7 +191,9 @@ static void hookAuthClasses(void) {
                 [name isEqualToString:@"buildSuccessViewWithExpire:"] ||
                 [name isEqualToString:@"setupAfterActivation"] ||
                 [name isEqualToString:@"checkTask"] ||
-                [name isEqualToString:@"onTapVerify"]) {
+                [name isEqualToString:@"onTapVerify"] ||
+                [name isEqualToString:@"shakeField"] ||
+                [name isEqualToString:@"authenticate:"]) {
                 isAuthClass = YES;
                 break;
             }
@@ -225,152 +202,156 @@ static void hookAuthClasses(void) {
         if (methods) free(methods);
 
         if (isAuthClass) {
-            LOG(@"Found auth class: %@", clsName);
+            LOG(@"发现验证类: %@", clsName);
 
-            // Hook activateCode:completion:
-            Method m1 = class_getInstanceMethod(cls, @selector(activateCode:completion:));
-            if (m1) {
-                IMP newImp = imp_implementationWithBlock(^(id self, NSString *code, void (^completion)(BOOL, id)) {
-                    LOG(@"Bypassed activateCode: %@", code);
-                    if (completion) {
-                        NSDictionary *fakeData = @{
-                            @"code": @0,
-                            @"msg": @"success",
-                            @"data": @{
-                                @"expire": @"2099-12-31 23:59:59",
-                                @"type": @"lifetime"
-                            }
-                        };
-                        completion(YES, fakeData);
-                    }
-                    // 触发成功 UI
-                    if ([self respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
-                        ((void (*)(id, SEL, NSString *))objc_msgSend)(self, @selector(buildSuccessViewWithExpire:), @"2099-12-31 23:59:59");
-                    }
-                    if ([self respondsToSelector:@selector(setupAfterActivation)]) {
-                        ((void (*)(id, SEL))objc_msgSend)(self, @selector(setupAfterActivation));
-                    }
-                    // 隐藏遮罩
-                    id mask = [self valueForKey:@"authMaskView"];
-                    if (mask) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            [mask setValue:@YES forKey:@"hidden"];
-                            [(UIView *)mask removeFromSuperview];
-                        });
-                    }
-                });
-                method_setImplementation(m1, newImp);
-            }
+            Method m;
 
-            // Hook verifyWithCompletion:
-            Method m2 = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
-            if (m2) {
-                IMP newImp = imp_implementationWithBlock(^(id self, void (^completion)(BOOL)) {
-                    LOG(@"Bypassed verifyWithCompletion");
-                    if (completion) completion(YES);
-                    id mask = [self valueForKey:@"authMaskView"];
-                    if (mask) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            [mask setValue:@YES forKey:@"hidden"];
-                            [(UIView *)mask removeFromSuperview];
-                        });
-                    }
-                });
-                method_setImplementation(m2, newImp);
-            }
+            m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
+            if (m) method_setImplementation(m, (IMP)hook_activateCode);
 
-            // Hook checkTask
-            Method m3 = class_getInstanceMethod(cls, @selector(checkTask));
-            if (m3) {
-                IMP newImp = imp_implementationWithBlock(^(id self) {
-                    // 什么都不做，过期检查永远通过
-                });
-                method_setImplementation(m3, newImp);
-            }
+            m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
+            if (m) method_setImplementation(m, (IMP)hook_verifyWithCompletion);
 
-            // Hook onTapVerify
-            Method m4 = class_getInstanceMethod(cls, @selector(onTapVerify));
-            if (m4) {
-                IMP newImp = imp_implementationWithBlock(^(id self) {
-                    LOG(@"Bypassed onTapVerify");
-                    if ([self respondsToSelector:@selector(activateCode:completion:)]) {
-                        ((void (*)(id, SEL, NSString *, void (^)(BOOL, id)))objc_msgSend)(
-                            self, @selector(activateCode:completion:), @"BYPASSED", ^(BOOL s, id d){});
-                    }
-                });
-                method_setImplementation(m4, newImp);
-            }
+            m = class_getInstanceMethod(cls, @selector(checkTask));
+            if (m) method_setImplementation(m, (IMP)hook_checkTask);
 
-            // Hook shakeField (禁用错误动画)
-            Method m5 = class_getInstanceMethod(cls, @selector(shakeField));
-            if (m5) {
-                IMP newImp = imp_implementationWithBlock(^(id self) {
-                    // 空实现
-                });
-                method_setImplementation(m5, newImp);
-            }
+            m = class_getInstanceMethod(cls, @selector(onTapVerify));
+            if (m) method_setImplementation(m, (IMP)hook_onTapVerify);
+
+            m = class_getInstanceMethod(cls, @selector(shakeField));
+            if (m) method_setImplementation(m, (IMP)hook_shakeField);
+
+            m = class_getInstanceMethod(cls, @selector(authenticate:));
+            if (m) method_setImplementation(m, (IMP)hook_authenticate);
         }
     }
 
     free(classes);
 }
 
-#pragma mark - Constructor
+// ============================================================
+// 网络请求拦截 (可选，作为兜底)
+// ============================================================
+static IMP orig_dataTaskWithRequest = NULL;
 
+typedef NSURLSessionDataTask *(*orig_dtwr_t)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+
+static NSURLSessionDataTask *hook_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completion)(NSData *, NSURLResponse *, NSError *)) {
+    NSString *urlStr = request.URL.absoluteString;
+    NSString *bodyStr = nil;
+    if (request.HTTPBody) {
+        bodyStr = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+    }
+
+    // 检测验证请求
+    NSString *lowUrl = urlStr.lowercaseString;
+    NSString *lowBody = bodyStr.lowercaseString;
+    NSArray *kw = @[@"auth", @"verify", @"license", @"activate", @"check", @"login", @"key", @"code", @"card"];
+    BOOL isAuth = NO;
+    for (NSString *k in kw) {
+        if ([lowUrl containsString:k] || [lowBody containsString:k]) { isAuth = YES; break; }
+    }
+
+    if (isAuth) {
+        LOG(@"拦截验证请求: %@", urlStr);
+        if (completion) {
+            NSString *json = @"{\"code\":0,\"msg\":\"success\",\"data\":{\"expire\":\"2099-12-31 23:59:59\",\"type\":\"lifetime\"}}";
+            NSData *data = [json dataUsingEncoding:NSUTF8StringEncoding];
+            NSHTTPURLResponse *resp = [[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Type": @"application/json"}];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(data, resp, nil); });
+        }
+        NSURLSession *s = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+        return [s dataTaskWithURL:[NSURL URLWithString:@"http://localhost"]];
+    }
+
+    return ((orig_dtwr_t)orig_dataTaskWithRequest)(self, _cmd, request, completion);
+}
+
+// ============================================================
+// 定时清理遮罩
+// ============================================================
+static void scheduleMaskCleanup() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = nil;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in scene.windows) {
+                    if (w.isKeyWindow) { keyWindow = w; break; }
+                }
+            }
+        }
+        if (!keyWindow) keyWindow = [UIApplication sharedApplication].keyWindow;
+        if (!keyWindow) { scheduleMaskCleanup(); return; }
+
+        // 递归查找并移除遮罩
+        void (^scan)(UIView *, int) = ^(UIView *view, int depth) {
+            if (depth > 15) return;
+            for (UIView *sv in [view.subviews copy]) {
+                CGRect f = sv.frame;
+                CGSize s = [UIScreen mainScreen].bounds.size;
+                BOOL full = (f.size.width >= s.width * 0.9 && f.size.height >= s.height * 0.9);
+
+                BOOL hasInput = NO;
+                for (UIView *ssv in sv.subviews) {
+                    if ([ssv isKindOfClass:[UITextField class]]) { hasInput = YES; break; }
+                    if ([ssv isKindOfClass:[UIButton class]]) {
+                        NSString *t = [(UIButton *)ssv titleForState:UIControlStateNormal];
+                        if ([t containsString:@"验证"] || [t containsString:@"激活"] || [t containsString:@"登录"]) {
+                            hasInput = YES; break;
+                        }
+                    }
+                }
+
+                if (full && hasInput) {
+                    LOG(@"清理遮罩: %@", sv);
+                    sv.hidden = YES;
+                    sv.userInteractionEnabled = NO;
+                    [sv removeFromSuperview];
+                    continue;
+                }
+                scan(sv, depth + 1);
+            }
+        };
+        scan(keyWindow, 0);
+
+        scheduleMaskCleanup();
+    });
+}
+
+// ============================================================
+// Constructor
+// ============================================================
 __attribute__((constructor))
-static void iphook_init(void) {
-    LOG(@"IPH loaded into process: %@", [[NSProcessInfo processInfo] processName]);
+static void iphook_init() {
+    LOG(@"========================================");
+    LOG(@"KFun 卡密 Bypass 已加载");
+    LOG(@"========================================");
 
-    // 1. Hook NSURLSession
+    // 1. 运行时扫描验证类
+    scanAndHookAuthClasses();
+
+    // 2. Hook NSURLSession 作为兜底
     Class sessionCls = objc_getClass("NSURLSession");
     if (sessionCls) {
         Method m = class_getInstanceMethod(sessionCls, @selector(dataTaskWithRequest:completionHandler:));
         if (m) {
-            orig_dataTaskWithRequest = (orig_dataTaskWithRequest_t)method_setImplementation(m, (IMP)hook_dataTaskWithRequest);
-            LOG(@"Hooked NSURLSession::dataTaskWithRequest:");
+            orig_dataTaskWithRequest = method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_dataTaskWithRequest);
+            LOG(@"Hooked NSURLSession");
         }
     }
 
-    // 2. Hook NSURLConnection (同步)
-    Class connCls = objc_getClass("NSURLConnection");
-    if (connCls) {
-        Method m = class_getClassMethod(connCls, @selector(sendSynchronousRequest:returningResponse:error:));
-        if (m) {
-            orig_sendSyncRequest = (orig_sendSyncRequest_t)method_setImplementation(m, (IMP)hook_sendSyncRequest);
-            LOG(@"Hooked NSURLConnection::sendSynchronousRequest:");
-        }
-    }
+    // 3. 启动定时清理
+    scheduleMaskCleanup();
 
-    // 3. 扫描并 Hook 验证类
-    hookAuthClasses();
-
-    // 4. 启动定时清理遮罩
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        scheduleMaskCleanup();
-    });
-
-    // 5. 监听应用启动，重新扫描
+    // 4. 监听应用启动
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                         object:nil
                                                          queue:[NSOperationQueue mainQueue]
                                                     usingBlock:^(NSNotification *note) {
-        LOG(@"App launched, rescanning auth classes...");
-        hookAuthClasses();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            UIWindow *keyWindow = nil;
-            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *window in scene.windows) {
-                        if (window.isKeyWindow) {
-                            keyWindow = window;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (keyWindow) hideAuthMasks(keyWindow, 0);
-        });
+        LOG(@"App 启动，重新扫描...");
+        scanAndHookAuthClasses();
     }];
 
-    LOG(@"IPH init complete");
+    LOG(@"初始化完成");
 }
