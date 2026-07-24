@@ -1,0 +1,29 @@
+name: Build Dylib
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Xcode command tools
+        run: xcode-select --install || true
+
+      - name: Compile arm64 dylib
+        run: |
+          clang -dynamiclib -arch arm64 \
+          -mios-version-min=15.0 \
+          -framework Foundation -framework UIKit \
+          -fobjc-arc \
+          kfun_bypass.m -o kfun_bypass.dylib
+
+      - name: Upload compiled dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: kfun_bypass
+          path: kfun_bypass.dylib
