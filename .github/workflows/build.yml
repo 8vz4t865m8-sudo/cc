@@ -11,27 +11,21 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install full Xcode (包含iOS SDK)
-        run: |
-          xcode-select -s /Applications/Xcode.app/Contents/Developer
+      - name: Fetch iOS SDK Path
+        run: echo "IOS_SDK=$(xcodebuild -version -sdk iphoneos Path)" >> $GITHUB_ENV
 
-      - name: Get iOS SDK path
-        id: sdkpath
-        run: |
-          echo "SDK=$(xcodebuild -sdk iphoneos -version Path)" >> $GITHUB_ENV
-
-      - name: Compile arm64 iOS dylib
+      - name: Compile iOS arm64 dylib
         run: |
           clang -dynamiclib \
           -arch arm64 \
           -mios-version-min=15.0 \
-          -isysroot ${{ env.SDK }} \
-          -framework Foundation -framework UIKit \
+          -isysroot ${{ env.IOS_SDK }} \
+          -framework Foundation \
           -fobjc-arc \
           kfun_bypass.m -o kfun_bypass.dylib
 
-      - name: Upload compiled dylib
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kfun_bypass
+          name: kfun_bypass-dylib
           path: kfun_bypass.dylib
