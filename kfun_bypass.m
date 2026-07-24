@@ -1,6 +1,5 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <UIKit/UIKit.h>
 
 static void swizzleMethod(Class cls, SEL originalSel, SEL newSel)
 {
