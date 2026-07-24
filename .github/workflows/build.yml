@@ -1,4 +1,4 @@
-name: Build KfunBypass Dylib
+name: Build IPHook Dylib
 
 on:
   push:
@@ -13,26 +13,17 @@ jobs:
 
       - name: 编译 dylib
         run: |
-          clang -arch arm64 \
-            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-            -framework Foundation \
-            -Wno-deprecated-declarations \
-            -Wno-objc-missing-super-calls \
-            -miphoneos-version-min=15.0 \
-            -fobjc-arc \
-            -dynamiclib \
-            kfun_bypass.m \
-            -o kfun_bypass.dylib
-          echo "Dylib size: $(ls -lh kfun_bypass.dylib)"
+          clang -arch arm64             -isysroot $(xcrun --sdk iphoneos --show-sdk-path)             -framework UIKit             -framework Foundation             -framework Security             -Wno-deprecated-declarations             -Wno-objc-missing-super-calls             -miphoneos-version-min=15.0             -fobjc-arc             -dynamiclib             iphook.m             -o iphook.dylib
+          echo "Dylib size: $(ls -lh iphook.dylib)"
 
-      - name: ldid自动签名
+      - name: 签名
         run: |
           brew install ldid
-          ldid -S kfun_bypass.dylib
+          ldid -S iphook.dylib
           echo "签名完成"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: kfun_bypass
-          path: kfun_bypass.dylib
+          name: iphook
+          path: iphook.dylib
