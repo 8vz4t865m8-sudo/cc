@@ -11,13 +11,21 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install Xcode command tools
-        run: xcode-select --install || true
-
-      - name: Compile arm64 dylib
+      - name: Install full Xcode (包含iOS SDK)
         run: |
-          clang -dynamiclib -arch arm64 \
+          xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Get iOS SDK path
+        id: sdkpath
+        run: |
+          echo "SDK=$(xcodebuild -sdk iphoneos -version Path)" >> $GITHUB_ENV
+
+      - name: Compile arm64 iOS dylib
+        run: |
+          clang -dynamiclib \
+          -arch arm64 \
           -mios-version-min=15.0 \
+          -isysroot ${{ env.SDK }} \
           -framework Foundation -framework UIKit \
           -fobjc-arc \
           kfun_bypass.m -o kfun_bypass.dylib
