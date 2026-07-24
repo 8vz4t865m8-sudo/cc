@@ -1,4 +1,5 @@
-name: Build Dylib
+name: Build KfunBypass Dylib
+
 on:
   push:
     branches: [ main ]
@@ -8,24 +9,30 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Fetch iOS SDK Path
-        run: echo "IOS_SDK=$(xcodebuild -version -sdk iphoneos Path)" >> $GITHUB_ENV
-
-      - name: Compile iOS arm64 dylib
+      - name: 编译 dylib
         run: |
-          clang -dynamiclib \
-          -arch arm64 \
-          -mios-version-min=15.0 \
-          -isysroot ${{ env.IOS_SDK }} \
-          -framework Foundation \
-          -fobjc-arc \
-          kfun_bypass.m -o kfun_bypass.dylib
+          clang -arch arm64 \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -framework Foundation \
+            -Wno-deprecated-declarations \
+            -Wno-objc-missing-super-calls \
+            -miphoneos-version-min=15.0 \
+            -fobjc-arc \
+            -dynamiclib \
+            kfun_bypass.m \
+            -o kfun_bypass.dylib
+          echo "Dylib size: $(ls -lh kfun_bypass.dylib)"
 
-      - name: Upload artifact
+      - name: ldid自动签名
+        run: |
+          brew install ldid
+          ldid -S kfun_bypass.dylib
+          echo "签名完成"
+
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: kfun_bypass-dylib
+          name: kfun_bypass
           path: kfun_bypass.dylib
