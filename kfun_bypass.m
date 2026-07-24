@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h> // 新增此行，解决objc_msgSend报错
 
 static void swizzleMethod(Class cls, SEL originalSel, SEL newSel)
 {
@@ -46,7 +47,7 @@ static void swizzleMethod(Class cls, SEL originalSel, SEL newSel)
     NSLog(@"[KfunBypass] 点击验证按钮，直接走成功流程");
     Class targetCls = NSClassFromString(@"WWWActivationViewController");
     SEL successSel = NSSelectorFromString(@"showSuccess:completion:");
-    if([self respondsToSelector:successSel]){
+    if([targetCls instancesRespondToSelector:successSel]){
         void (*func)(id, SEL, id, id) = (void (*)(id,SEL,id,id))objc_msgSend;
         func(self, successSel, @{@"expire":@"2027-12-31"}, nil);
     }
