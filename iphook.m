@@ -1,7 +1,6 @@
 //
-//  iphook.m - KFun 卡密验证 Bypass (网络拦截版)
-//  策略: 只 Hook NSURLSession，拦截验证请求返回伪造成功
-//  不碰任何 UI 方法，让原 App 自己处理
+//  iphook.m - KFun 纯 Bypass（随便输入卡密直接进入）
+//  目标类: WWWActivation
 //
 
 #import <UIKit/UIKit.h>
@@ -11,145 +10,185 @@
 #define LOG(fmt, ...) NSLog(@"[IPH] " fmt, ##__VA_ARGS__)
 
 // ============================================================
-// 伪造成功响应
+// 进入主界面（手动操作UI，不依赖任何原生回调）
 // ============================================================
-static NSData *fakeSuccessData() {
-    static NSData *data = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSString *json = @"{\"code\":0,\"msg\":\"success\",\"data\":{\"expire\":\"2099-12-31 23:59:59\",\"type\":\"lifetime\",\"uid\":\"bypassed\"}}";
-        data = [json dataUsingEncoding:NSUTF8StringEncoding];
+static void enterMain(id self) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 1. 隐藏遮罩层（关键！否则雷达界面被挡住）
+        id mask = nil;
+        @try { mask = [self valueForKey:@"authMaskView"]; } @catch (NSException *e) {}
+        if (mask && [mask isKindOfClass:[UIView class]]) {
+            [(UIView *)mask setHidden:YES];
+            [(UIView *)mask removeFromSuperview];
+            LOG(@"authMaskView 已移除");
+        }
+        
+        // 2. 停止按钮转圈
+        id verifyBtn = nil;
+        @try { verifyBtn = [self valueForKey:@"verifyButton"]; } @catch (NSException *e) {}
+        if (verifyBtn) {
+            id spinner = nil;
+            @try { spinner = [verifyBtn valueForKey:@"spinner"]; } @catch (NSException *e) {}
+            if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
+                [(UIActivityIndicatorView *)spinner stopAnimating];
+            }
+        }
+        
+        // 3. 调用 setupAfterActivation（启动雷达核心逻辑）
+        if ([self respondsToSelector:@selector(setupAfterActivation)]) {
+            @try {
+                [self performSelector:@selector(setupAfterActivation)];
+                LOG(@"setupAfterActivation 成功");
+            } @catch (NSException *e) {
+                LOG(@"setupAfterActivation 失败: %@", e);
+            }
+        }
+        
+        // 4. 如果验证页是模态弹窗，直接关掉
+        @try {
+            if ([self isKindOfClass:[UIViewController class]]) {
+                UIViewController *vc = (UIViewController *)self;
+                if (vc.presentingViewController) {
+                    [vc dismissViewControllerAnimated:NO completion:nil];
+                    LOG(@"验证页已 dismiss");
+                }
+            }
+        } @catch (NSException *e) {}
     });
-    return data;
-}
-
-static NSHTTPURLResponse *fakeResponse(NSURL *url) {
-    return [[NSHTTPURLResponse alloc] initWithURL:url
-                                         statusCode:200
-                                        HTTPVersion:@"HTTP/1.1"
-                                       headerFields:@{@"Content-Type": @"application/json"}];
 }
 
 // ============================================================
-// 判断是否是验证请求
+// Hook 1: onTapVerify（按钮点击，最高优先级）
 // ============================================================
-static BOOL isAuthRequest(NSURLRequest *request) {
-    NSString *url = request.URL.absoluteString.lowercaseString;
-    NSString *body = nil;
-    if (request.HTTPBody) {
-        body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+static void hook_onTapVerify(id self, SEL _cmd) {
+    LOG(@"🎯 onTapVerify 被拦截，直接放行");
+    
+    // 不管输入框里是什么，直接显示成功
+    if ([self respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+        @try {
+            [self performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
+        } @catch (NSException *e) {}
     }
-
-    // 检查 URL 是否包含验证关键词
-    NSArray *urlKeywords = @[@"auth", @"verify", @"license", @"activate", @"check", @"login", 
-                              @"key", @"code", @"card", @"token", @"bind", @"machine", @"device"];
-    for (NSString *k in urlKeywords) {
-        if ([url containsString:k]) return YES;
-    }
-
-    // 检查 POST body 是否包含卡密相关字段
-    if (body) {
-        NSString *lowBody = body.lowercaseString;
-        NSArray *bodyKeywords = @[@"code", @"kami", @"card", @"key", @"auth", @"verify", 
-                                  @"license", @"activate", @"token", @"udid", @"device", @"machine"];
-        for (NSString *k in bodyKeywords) {
-            if ([lowBody containsString:k]) return YES;
-        }
-    }
-
-    return NO;
+    
+    // 延迟 0.5 秒进入主界面（给成功动画一点时间）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        enterMain(self);
+    });
 }
 
 // ============================================================
-// Hook NSURLSession dataTaskWithRequest:completionHandler:
+// Hook 2: activateCode:completion:（代码调用入口）
+// ⚠️ 不调用原生的 completion，避免 block 签名闪退/卡死
 // ============================================================
-static IMP orig_dtwr = NULL;
-
-typedef NSURLSessionDataTask *(*dtwr_t)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
-
-static NSURLSessionDataTask *hook_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^completion)(NSData *, NSURLResponse *, NSError *)) {
-
-    if (isAuthRequest(request)) {
-        LOG(@"拦截验证请求: %@", request.URL.absoluteString);
-        if (request.HTTPBody) {
-            NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
-            LOG(@"请求体: %@", body);
-        }
-
-        // 直接返回伪造成功响应
-        if (completion) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(fakeSuccessData(), fakeResponse(request.URL), nil);
-            });
-        }
-
-        // 返回一个假的 task
-        NSURLSession *s = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
-        return [s dataTaskWithURL:[NSURL URLWithString:@"http://localhost"]];
+static void hook_activateCode(id self, SEL _cmd, NSString *code, id completion) {
+    LOG(@"🎯 activateCode: 被拦截，code=%@", code);
+    
+    if ([self respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+        @try {
+            [self performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
+        } @catch (NSException *e) {}
     }
-
-    // 非验证请求，走原逻辑
-    return ((dtwr_t)orig_dtwr)(self, _cmd, request, completion);
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        enterMain(self);
+    });
+    
+    // ❌ 不调用原生的 completion(id)，避免签名不匹配
 }
 
 // ============================================================
-// Hook NSURLConnection sendSynchronousRequest (备用)
+// Hook 3: verifyWithCompletion:（启动时自动验证）
 // ============================================================
-static IMP orig_sendSync = NULL;
-
-typedef NSData *(*sendSync_t)(Class, SEL, NSURLRequest *, NSURLResponse **, NSError **);
-
-static NSData *hook_sendSync(Class self, SEL _cmd, NSURLRequest *request, NSURLResponse **response, NSError **error) {
-
-    if (isAuthRequest(request)) {
-        LOG(@"拦截同步验证请求: %@", request.URL.absoluteString);
-        if (response) *response = fakeResponse(request.URL);
-        if (error) *error = nil;
-        return fakeSuccessData();
+static void hook_verifyWithCompletion(id self, SEL _cmd, id completion) {
+    LOG(@"🎯 verifyWithCompletion: 被拦截");
+    
+    if ([self respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+        @try {
+            [self performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
+        } @catch (NSException *e) {}
     }
-
-    return ((sendSync_t)orig_sendSync)(self, _cmd, request, response, error);
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        enterMain(self);
+    });
+    
+    // ❌ 不调用 completion
 }
 
 // ============================================================
-// 初始化
+// Hook 4: showError:（拦截错误提示）
 // ============================================================
-static void doInit() {
-    LOG(@"开始 Hook 网络请求...");
+static void hook_showError(id self, SEL _cmd, NSString *msg) {
+    LOG(@"🛡️ showError 被拦截: %@", msg);
+    // 不显示错误，直接成功
+    enterMain(self);
+}
 
-    // Hook NSURLSession
-    Class sessionCls = objc_getClass("NSURLSession");
-    if (sessionCls) {
-        Method m = class_getInstanceMethod(sessionCls, @selector(dataTaskWithRequest:completionHandler:));
-        if (m) {
-            orig_dtwr = method_getImplementation(m);
-            method_setImplementation(m, (IMP)hook_dtwr);
-            LOG(@"Hooked NSURLSession dataTaskWithRequest:");
-        }
+// ============================================================
+// Hook 5: checkTask / shakeField（禁用过期检查和抖动）
+// ============================================================
+static void hook_checkTask(id self, SEL _cmd) {
+    LOG(@"🛡️ checkTask 被拦截");
+}
+static void hook_shakeField(id self, SEL _cmd) {
+    LOG(@"🛡️ shakeField 被拦截");
+}
+
+// ============================================================
+// Hook 6: isActivated / isVerified（永远返回 YES）
+// ============================================================
+static BOOL hook_isActivated(id self, SEL _cmd) {
+    return YES;
+}
+
+// ============================================================
+// 安装 Hook
+// ============================================================
+static void installHooks() {
+    Class cls = objc_getClass("WWWActivation");
+    if (!cls) {
+        LOG(@"❌ 找不到 WWWActivation!");
+        return;
     }
-
-    // Hook NSURLConnection (同步请求)
-    Class connCls = objc_getClass("NSURLConnection");
-    if (connCls) {
-        Method m = class_getClassMethod(connCls, @selector(sendSynchronousRequest:returningResponse:error:));
-        if (m) {
-            orig_sendSync = method_getImplementation(m);
-            method_setImplementation(m, (IMP)hook_sendSync);
-            LOG(@"Hooked NSURLConnection sendSynchronousRequest:");
-        }
+    LOG(@"✅ 找到类: WWWActivation");
+    
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(onTapVerify));
+    if (m) { method_setImplementation(m, (IMP)hook_onTapVerify); LOG(@"✅ onTapVerify"); }
+    
+    m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
+    if (m) { method_setImplementation(m, (IMP)hook_activateCode); LOG(@"✅ activateCode:completion:"); }
+    
+    m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
+    if (m) { method_setImplementation(m, (IMP)hook_verifyWithCompletion); LOG(@"✅ verifyWithCompletion:"); }
+    
+    m = class_getInstanceMethod(cls, @selector(showError:));
+    if (m) { method_setImplementation(m, (IMP)hook_showError); LOG(@"✅ showError:"); }
+    
+    m = class_getInstanceMethod(cls, @selector(checkTask));
+    if (m) { method_setImplementation(m, (IMP)hook_checkTask); LOG(@"✅ checkTask"); }
+    
+    m = class_getInstanceMethod(cls, @selector(shakeField));
+    if (m) { method_setImplementation(m, (IMP)hook_shakeField); LOG(@"✅ shakeField"); }
+    
+    m = class_getInstanceMethod(cls, @selector(isActivated));
+    if (m) { method_setImplementation(m, (IMP)hook_isActivated); LOG(@"✅ isActivated"); }
+    else {
+        m = class_getInstanceMethod(cls, @selector(isVerified));
+        if (m) { method_setImplementation(m, (IMP)hook_isActivated); LOG(@"✅ isVerified"); }
     }
-
-    LOG(@"初始化完成");
+    
+    LOG(@"🚀 全部 Hook 完成");
 }
 
 __attribute__((constructor))
 static void iphook_init() {
     LOG(@"========================================");
-    LOG(@"KFun Bypass 网络拦截版 已加载");
+    LOG(@"KFun Bypass 极简版已加载");
     LOG(@"========================================");
-
-    // 延迟初始化，确保网络框架已加载
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        doInit();
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        installHooks();
     });
 }
