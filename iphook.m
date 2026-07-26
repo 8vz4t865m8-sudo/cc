@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass v12
-//  核心：调用 showSuccess:completion: 传入 completion block，在 block 里初始化
+//  iphook.m - KFun Bypass v13
+//  修复：completion block 里调用 ActVC 的 setupAfterActivation + 网络记录
 //
 
 #import <UIKit/UIKit.h>
@@ -15,11 +15,11 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV12] %@", line);
+    NSLog(@"[KFunV13] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
-    if (g_logBuffer.length > 12000) {
-        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 12000)];
+    if (g_logBuffer.length > 15000) {
+        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 15000)];
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_logView) {
@@ -78,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v12 (拖动)";
+        title.text = @"🔍 KFun v13 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -129,57 +129,29 @@ static void snapshotProperties(id obj, NSString *label) {
 }
 
 // ============================================================
-// ⭐ 初始化 MainVC（根据真卡密日志推断）
+// 网络记录
 // ============================================================
-static void initMainVC(id mainVC) {
-    if (!mainVC) return;
-    LOG(@"🔧 初始化 MainVC");
-    
-    // 设置状态文本（真卡密日志中看到的值）
-    @try {
-        if ([mainVC respondsToSelector:@selector(setStatusText:)]) {
-            [mainVC performSelector:@selector(setStatusText:) withObject:@"等待操作"];
-            LOG(@"✅ statusText = 等待操作");
-        }
-        if ([mainVC respondsToSelector:@selector(setDataText:)]) {
-            [mainVC performSelector:@selector(setDataText:) withObject:@"等待连接…"];
-            LOG(@"✅ dataText = 等待连接…");
-        }
-    } @catch (NSException *e) { LOG(@"❌ 设置文本: %@", e.reason); }
-    
-    // 调用已知存在的方法
-    NSArray *methods = @[
-        @"setupBackgroundKeepAlive",
-        @"setupAfterActivation",
-        @"audioPlay"
-    ];
-    for (NSString *selName in methods) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([mainVC respondsToSelector:sel]) {
-            @try {
-                [mainVC performSelector:sel];
-                LOG(@"✅ %@ 已调用", selName);
-            } @catch (NSException *e) {
-                LOG(@"❌ %@: %@", selName, e.reason);
+static void recordNetwork() {
+    Class cls = [NSURLSession class];
+    Method m = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    const char *typeEnc = method_getTypeEncoding(m);
+    IMP newIMP = imp_implementationWithBlock(^(id self, NSURL *url, id completion) {
+        LOG(@"🌐 请求: %@", url.absoluteString);
+        id wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+            LOG(@"🌐 响应: %@ | %ld | %@", url.absoluteString, (long)(http?http.statusCode:0), error?error.localizedDescription:@"ok");
+            if (data && data.length < 2000) {
+                NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (body) LOG(@"🌐 Body: %@", body);
             }
-        } else {
-            LOG(@"⚠️ %@ 不存在", selName);
-        }
-    }
-    
-    // 尝试触发 tableView 懒加载（通过 getter）
-    @try {
-        id tv = [mainVC valueForKey:@"tableView"];
-        LOG(@"   tableView getter: %@", tv ? @"非nil" : @"nil");
-    } @catch (NSException *e) { LOG(@"❌ tableView getter: %@", e.reason); }
-    
-    // 尝试触发 langSeg 懒加载
-    @try {
-        id seg = [mainVC valueForKey:@"langSeg"];
-        LOG(@"   langSeg getter: %@", seg ? @"非nil" : @"nil");
-    } @catch (NSException *e) { LOG(@"❌ langSeg getter: %@", e.reason); }
-    
-    snapshotProperties(mainVC, @"MainVC(初始化后)");
+            if (completion) ((void(^)(NSData*,NSURLResponse*,NSError*))completion)(data, response, error);
+        };
+        return ((id (*)(id, SEL, NSURL*, id))orig)(self, @selector(dataTaskWithURL:completionHandler:), url, wrapped);
+    });
+    class_replaceMethod(cls, @selector(dataTaskWithURL:completionHandler:), newIMP, typeEnc);
+    LOG(@"✅ 网络记录已启用");
 }
 
 // ============================================================
@@ -213,20 +185,42 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // ⭐ 关键：调用 showSuccess:completion:，传入 completion block
+    // ⭐ 关键：调用 showSuccess:completion: 传入 completion block
     @try {
         if ([vcInstance respondsToSelector:@selector(showSuccess:completion:)]) {
             LOG(@"⭐ 调用 showSuccess:completion:...");
             
-            // 构造 completion block
+            // 捕获 vcInstance 弱引用，避免循环引用
+            __weak id weakVC = vcInstance;
             id completionBlock = ^(void) {
-                LOG(@"🎉 completion block 被执行！");
-                // completion block 里初始化 MainVC
+                LOG(@"🎉 completion block 执行！");
+                __strong id strongVC = weakVC;
+                if (strongVC) {
+                    // 1. 调用 ActVC 的 setupAfterActivation（关键！）
+                    if ([strongVC respondsToSelector:@selector(setupAfterActivation)]) {
+                        [strongVC performSelector:@selector(setupAfterActivation)];
+                        LOG(@"✅ ActVC setupAfterActivation 已调用");
+                    }
+                    snapshotProperties(strongVC, @"ActVC(completion后)");
+                }
+                
+                // 2. 初始化 MainVC 状态文本
                 Class mainVCClass = objc_getClass("ViewController");
                 for (UIWindow *window in [UIApplication sharedApplication].windows) {
                     UIViewController *root = window.rootViewController;
                     if ([root isKindOfClass:mainVCClass]) {
-                        initMainVC(root);
+                        @try {
+                            if ([root respondsToSelector:@selector(setStatusText:)]) {
+                                [root performSelector:@selector(setStatusText:) withObject:@"等待操作"];
+                            }
+                            if ([root respondsToSelector:@selector(setDataText:)]) {
+                                [root performSelector:@selector(setDataText:) withObject:@"等待连接…"];
+                            }
+                            LOG(@"✅ MainVC 状态文本已设置");
+                        } @catch (NSException *e) {
+                            LOG(@"❌ MainVC 设置失败: %@", e.reason);
+                        }
+                        snapshotProperties(root, @"MainVC(completion后)");
                         break;
                     }
                 }
@@ -247,7 +241,7 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
-    // 延迟 dismiss（给 showSuccess 时间显示弹窗）
+    // 延迟 dismiss（给弹窗显示时间）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if ([vcInstance isKindOfClass:[UIViewController class]]) {
@@ -255,13 +249,13 @@ static void doBypass(id vcInstance) {
                 if (vc.presentingViewController) {
                     [vc dismissViewControllerAnimated:NO completion:^{
                         LOG(@"✅ dismiss 完成");
-                        // dismiss 后再初始化一次（兜底）
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        // dismiss 后再次检查 MainVC
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                             Class mainVCClass = objc_getClass("ViewController");
                             for (UIWindow *window in [UIApplication sharedApplication].windows) {
                                 UIViewController *root = window.rootViewController;
                                 if ([root isKindOfClass:mainVCClass]) {
-                                    initMainVC(root);
+                                    snapshotProperties(root, @"MainVC(dismiss后)");
                                     break;
                                 }
                             }
@@ -373,11 +367,12 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV12] v12 completionBlock版已加载");
+    NSLog(@"[KFunV13] v13 ActVC-setupAfterActivation版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupLogWindow();
+        recordNetwork();
         
         Class vcClass = objc_getClass("WWWActivationViewController");
         if (vcClass) hookActivationVC(vcClass);
