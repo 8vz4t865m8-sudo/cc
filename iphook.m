@@ -1,12 +1,11 @@
 //
-//  iphook.m - KFun Bypass 修复版 v8
-//  核心：dlsym 获取 block_getType_np 安全读签名，避免 C 指针硬读导致 SIGBUS
+//  iphook.m - KFun Bypass 修复版 v9
+//  核心：放弃调用 onVerify，改为手动初始化 ViewController
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <dlfcn.h>
 
 #define LOG(fmt, ...) logLine([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
@@ -16,7 +15,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV8] %@", line);
+    NSLog(@"[KFunV9] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 12000) {
@@ -79,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v8 (拖动)";
+        title.text = @"🔍 KFun v9 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -109,71 +108,6 @@ static void setupLogWindow() {
     });
 }
 
-// ============================================================
-// ⭐ 安全读取 Block 签名（dlsym 获取 Apple 私有 API）
-// ============================================================
-static const char *safeGetBlockSignature(id blockObj) {
-    if (!blockObj) return NULL;
-    
-    // 用 dlsym 安全获取 block_getType_np，避免硬读内存布局
-    static const char *(*block_getType_np)(const void *) = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        block_getType_np = dlsym(RTLD_DEFAULT, "block_getType_np");
-    });
-    
-    if (!block_getType_np) {
-        LOG(@"⚠️ block_getType_np 不存在");
-        return NULL;
-    }
-    
-    const char *sig = block_getType_np((__bridge void *)blockObj);
-    return sig;
-}
-
-static void safeInvokeBlock(id blockObj) {
-    if (!blockObj) { LOG(@"⚠️ block 为 nil"); return; }
-    
-    const char *sig = safeGetBlockSignature(blockObj);
-    LOG(@"⭐ Block 签名: %s", sig ? sig : "无");
-    
-    if (!sig) {
-        LOG(@"⚠️ 读不到签名，放弃调用");
-        return;
-    }
-    
-    // 解析签名：数 '@' 个数（第一个是 block 自身 @?）
-    int paramCount = 0;
-    for (const char *p = sig; *p; p++) {
-        if (*p == '@') paramCount++;
-    }
-    int actualParams = paramCount - 1;
-    LOG(@"⭐ Block 参数个数: %d", actualParams);
-    
-    @try {
-        if (actualParams <= 0) {
-            typedef void (^VoidBlock)(void);
-            VoidBlock blk = (VoidBlock)blockObj;
-            blk();
-            LOG(@"✅ 无参 block 调用成功");
-        } else if (actualParams == 1) {
-            typedef void (^OneParamBlock)(id);
-            OneParamBlock blk = (OneParamBlock)blockObj;
-            blk(@"2099-12-31 23:59:59");
-            LOG(@"✅ 1参 block 调用成功");
-        } else if (actualParams == 2) {
-            typedef void (^TwoParamBlock)(BOOL, id);
-            TwoParamBlock blk = (TwoParamBlock)blockObj;
-            blk(YES, @"2099-12-31 23:59:59");
-            LOG(@"✅ 2参 block 调用成功");
-        } else {
-            LOG(@"⚠️ 参数太多(%d)，放弃调用", actualParams);
-        }
-    } @catch (NSException *e) {
-        LOG(@"❌ Block 调用失败: %@", e.reason);
-    }
-}
-
 static void snapshotProperties(id obj, NSString *label) {
     if (!obj) { LOG(@"❌ %@ nil", label); return; }
     LOG(@"📸 [%@] begin", label);
@@ -195,7 +129,89 @@ static void snapshotProperties(id obj, NSString *label) {
 }
 
 // ============================================================
-// 🚀 Bypass 核心
+// ⭐ 手动初始化 ViewController
+// ============================================================
+static void initViewController(id vc) {
+    if (!vc) { LOG(@"❌ ViewController 实例 nil"); return; }
+    LOG(@"🔧 开始手动初始化 ViewController");
+    
+    // 1. 设置 state = 1（验证成功状态）
+    @try {
+        [vc setValue:@(1) forKey:@"state"];
+        LOG(@"✅ state 已设为 1");
+    } @catch (NSException *e) {
+        LOG(@"❌ 设置 state 失败: %@", e.reason);
+    }
+    
+    // 2. 尝试调用各种初始化方法
+    NSArray *initMethods = @[
+        @"setupBackgroundKeepAlive",
+        @"setUpAudioSession",
+        @"startRunInbackGround",
+        @"audioPlay",
+        @"setupAfterActivation",
+        @"setup",
+        @"reloadData"
+    ];
+    for (NSString *selName in initMethods) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([vc respondsToSelector:sel]) {
+            @try {
+                [vc performSelector:sel];
+                LOG(@"✅ %@ 已调用", selName);
+            } @catch (NSException *e) {
+                LOG(@"❌ %@ 失败: %@", selName, e.reason);
+            }
+        } else {
+            LOG(@"⚠️ %@ 不存在", selName);
+        }
+    }
+    
+    // 3. 尝试触发 tableView 懒加载
+    @try {
+        if ([vc respondsToSelector:@selector(tableView)]) {
+            id tv = [vc performSelector:@selector(tableView)];
+            LOG(@"✅ tableView getter 返回: %@", tv ? @"非nil" : @"nil");
+            if (tv && [tv isKindOfClass:[UITableView class]]) {
+                [(UITableView *)tv reloadData];
+                LOG(@"✅ tableView reloadData 已调用");
+            }
+        }
+    } @catch (NSException *e) {
+        LOG(@"❌ tableView 操作失败: %@", e.reason);
+    }
+    
+    // 4. 设置状态文本
+    @try {
+        if ([vc respondsToSelector:@selector(setStatusText:)]) {
+            [vc performSelector:@selector(setStatusText:) withObject:@"已连接"];
+            LOG(@"✅ statusText 已设置");
+        }
+        if ([vc respondsToSelector:@selector(setDataText:)]) {
+            [vc performSelector:@selector(setDataText:) withObject:@"等待数据..."];
+            LOG(@"✅ dataText 已设置");
+        }
+    } @catch (NSException *e) {
+        LOG(@"❌ 设置文本失败: %@", e.reason);
+    }
+    
+    // 5. 尝试触发 langSeg
+    @try {
+        if ([vc respondsToSelector:@selector(setLangSeg:)]) {
+            LOG(@"✅ setLangSeg: 存在");
+        }
+        id langSeg = [vc valueForKey:@"langSeg"];
+        LOG(@"   langSeg 当前值: %@", langSeg ? @"非nil" : @"nil");
+    } @catch (NSException *e) {}
+    
+    // 6. 快照检查
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        snapshotProperties(vc, @"MainVC(手动初始化后)");
+    });
+}
+
+// ============================================================
+// 🚀 Bypass 核心（回到 v4 安全逻辑）
 // ============================================================
 static void doBypass(id vcInstance) {
     LOG(@"🚀 Bypass 开始");
@@ -232,41 +248,39 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
-    // ⭐ 安全调用 onVerify block
-    @try {
-        id onVerify = [vcInstance valueForKey:@"onVerify"];
-        if (onVerify) {
-            LOG(@"⭐ 发现 onVerify block");
-            safeInvokeBlock(onVerify);
-        } else {
-            LOG(@"⚠️ onVerify 为 nil");
-        }
-    } @catch (NSException *e) {
-        LOG(@"❌ onVerify 异常: %@", e.reason);
-    }
-    
+    // 延迟 dismiss 后初始化主页面
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if ([vcInstance isKindOfClass:[UIViewController class]]) {
                 UIViewController *vc = (UIViewController *)vcInstance;
                 if (vc.presentingViewController) {
-                    [vc dismissViewControllerAnimated:NO completion:nil];
-                    LOG(@"✅ dismiss 验证页");
+                    [vc dismissViewControllerAnimated:NO completion:^{
+                        LOG(@"✅ dismiss 完成");
+                        // dismiss 后找到主 VC 并初始化
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            Class mainVCClass = objc_getClass("ViewController");
+                            for (UIWindow *window in [UIApplication sharedApplication].windows) {
+                                UIViewController *root = window.rootViewController;
+                                if ([root isKindOfClass:mainVCClass]) {
+                                    initViewController(root);
+                                    break;
+                                }
+                            }
+                        });
+                    }];
+                } else {
+                    // 如果没有 presentingViewController，直接初始化
+                    Class mainVCClass = objc_getClass("ViewController");
+                    for (UIWindow *window in [UIApplication sharedApplication].windows) {
+                        UIViewController *root = window.rootViewController;
+                        if ([root isKindOfClass:mainVCClass]) {
+                            initViewController(root);
+                            break;
+                        }
+                    }
                 }
             }
         } @catch (NSException *e) {}
-        
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            Class mainVCClass = objc_getClass("ViewController");
-            for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                UIViewController *root = window.rootViewController;
-                if ([root isKindOfClass:mainVCClass]) {
-                    LOG(@"🔍 找到主页面，检查状态...");
-                    snapshotProperties(root, @"MainVC(修复后)");
-                    break;
-                }
-            }
-        });
     });
 }
 
@@ -362,6 +376,15 @@ static void hookViewController(Class cls) {
             LOG(@"🎯 [MainVC] viewDidAppear:");
             ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
             snapshotProperties(self, @"MainVC(viewDidAppear)");
+            
+            // 如果 state 还是 0，尝试自动初始化（备用机制）
+            @try {
+                id stateVal = [self valueForKey:@"state"];
+                if (stateVal && [stateVal integerValue] == 0) {
+                    LOG(@"⚠️ MainVC state=0，触发自动初始化");
+                    initViewController(self);
+                }
+            } @catch (NSException *e) {}
         });
         class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
         LOG(@"  ✅ viewDidAppear:");
@@ -371,7 +394,7 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV8] v8 dlsym安全版已加载");
+    NSLog(@"[KFunV9] v9 手动初始化版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -384,6 +407,6 @@ static void iphook_init() {
         if (mainVC) hookViewController(mainVC);
         
         LOG(@"🚀 初始化完成");
-        LOG(@"📋 操作：打开软件 → 点验证 → 观察日志 → 复制发给我");
+        LOG(@"📋 操作：打开软件 → 点验证 → 等 3 秒 → 观察主页面 → 复制日志");
     });
 }
