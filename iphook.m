@@ -1,6 +1,5 @@
 //
-//  iphook.m - KFun Bypass 精准版 v3
-//  只 hook WWWActivationViewController（UI层）
+//  iphook.m - KFun Bypass 精准版 v3 (ARC修复)
 //
 
 #import <UIKit/UIKit.h>
@@ -31,9 +30,6 @@ static void addLog(NSString *fmt, ...) {
     });
 }
 
-// ============================================================
-// 🪟 悬浮窗
-// ============================================================
 @interface LogDragHandler : NSObject
 @end
 @implementation LogDragHandler
@@ -114,13 +110,9 @@ static void setupLogWindow() {
     });
 }
 
-// ============================================================
-// 🚀 Bypass 核心（操作 VC 实例）
-// ============================================================
 static void doBypass(id vcInstance) {
     addLog(@"🚀 开始 Bypass...");
     
-    // 1. 停止转圈
     @try {
         id spinner = [vcInstance valueForKey:@"spinner"];
         if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
@@ -130,14 +122,12 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // 2. 关闭 loading
     @try {
         if ([vcInstance respondsToSelector:@selector(setLoading:)]) {
             [vcInstance performSelector:@selector(setLoading:) withObject:@NO];
         }
     } @catch (NSException *e) {}
     
-    // 3. 隐藏遮罩
     @try {
         id mask = [vcInstance valueForKey:@"authMaskView"];
         if (mask && [mask isKindOfClass:[UIView class]]) {
@@ -147,7 +137,6 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // 4. 隐藏错误标签
     @try {
         id errorLabel = [vcInstance valueForKey:@"errorLabel"];
         if (errorLabel && [errorLabel isKindOfClass:[UIView class]]) {
@@ -155,7 +144,6 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // 5. 显示成功弹窗
     @try {
         if ([vcInstance respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
             [vcInstance performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
@@ -167,7 +155,6 @@ static void doBypass(id vcInstance) {
         addLog(@"❌ buildSuccessViewWithExpire: 失败: %@", e.reason);
     }
     
-    // 6. 启动雷达核心
     @try {
         if ([vcInstance respondsToSelector:@selector(setupAfterActivation)]) {
             [vcInstance performSelector:@selector(setupAfterActivation)];
@@ -179,7 +166,6 @@ static void doBypass(id vcInstance) {
         addLog(@"❌ setupAfterActivation 失败: %@", e.reason);
     }
     
-    // 7. 延迟关闭弹窗
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if ([vcInstance isKindOfClass:[UIViewController class]]) {
@@ -193,16 +179,12 @@ static void doBypass(id vcInstance) {
     });
 }
 
-// ============================================================
-// 🎣 Hook WWWActivationViewController
-// ============================================================
 static void hookVCClass(Class cls) {
     if (!cls) { addLog(@"❌ 未找到 WWWActivationViewController"); return; }
     addLog(@"🎣 Hook VC: %s", class_getName(cls));
     
     Method m;
     
-    // viewDidLoad — 界面创建时自动 bypass
     m = class_getInstanceMethod(cls, @selector(viewDidLoad));
     if (m) {
         method_setImplementation(m, imp_implementationWithBlock(^(id self) {
@@ -216,7 +198,6 @@ static void hookVCClass(Class cls) {
         addLog(@"  ✅ viewDidLoad");
     }
     
-    // onTapVerify — 按钮点击时 bypass
     m = class_getInstanceMethod(cls, @selector(onTapVerify));
     if (m) {
         method_setImplementation(m, imp_implementationWithBlock(^(id self) {
@@ -228,7 +209,6 @@ static void hookVCClass(Class cls) {
         addLog(@"  ⚠️ 无 onTapVerify");
     }
     
-    // showError: — 拦截错误提示
     m = class_getInstanceMethod(cls, @selector(showError:));
     if (m) {
         method_setImplementation(m, imp_implementationWithBlock(^(id self, NSString *msg) {
@@ -238,7 +218,6 @@ static void hookVCClass(Class cls) {
         addLog(@"  ✅ showError:");
     }
     
-    // isActivated — 永远返回 YES
     m = class_getInstanceMethod(cls, @selector(isActivated));
     if (m) {
         method_setImplementation(m, imp_implementationWithBlock(^(id self) {
@@ -247,7 +226,6 @@ static void hookVCClass(Class cls) {
         addLog(@"  ✅ isActivated -> YES");
     }
     
-    // isVerified — 永远返回 YES
     m = class_getInstanceMethod(cls, @selector(isVerified));
     if (m) {
         method_setImplementation(m, imp_implementationWithBlock(^(id self) {
@@ -258,29 +236,17 @@ static void hookVCClass(Class cls) {
 }
 
 // ============================================================
-// 🎣 Hook WWWActivation（备用）
+// Hook UIControl sendAction（C函数方式，兼容ARC）
 // ============================================================
-static void hookLogicClass(Class cls) {
-    if (!cls) return;
-    addLog(@"🎣 Hook Logic: %s", class_getName(cls));
-    
-    Method m;
-    
-    m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
-    if (m) {
-        method_setImplementation(m, imp_implementationWithBlock(^(id self, NSString *code, id completion) {
-            addLog(@"🎯 activateCode: 被拦截, code=%@", code);
-            // 不调用原生 completion，避免 block 签名问题
-            // 尝试找到关联的 VC 并 bypass
-            // 但这里 self 是 WWWActivation，不是 VC，所以只记录不操作
-        }));
-        addLog(@"  ✅ activateCode:completion:");
+static void (*orig_controlSendAction)(id, SEL, SEL, id, id);
+
+static void swizzled_controlSendAction(id self, SEL _cmd, SEL action, id target, UIEvent *event) {
+    if ([self isKindOfClass:[UIButton class]]) {
+        addLog(@"🖱️ 按钮点击: %@ -> %@.%@", NSStringFromClass([self class]), target ? NSStringFromClass([target class]) : @"nil", NSStringFromSelector(action));
     }
+    orig_controlSendAction(self, _cmd, action, target, event);
 }
 
-// ============================================================
-// 初始化
-// ============================================================
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
@@ -291,28 +257,16 @@ static void iphook_init() {
         
         setupLogWindow();
         
-        // 1. Hook UIControl（记录按钮点击）
         Class controlClass = [UIControl class];
         Method m = class_getInstanceMethod(controlClass, @selector(sendAction:to:forEvent:));
         if (m) {
-            static void (*orig)(id, SEL, SEL, id, id);
-            orig = (void (*)(id, SEL, SEL, id, id))method_getImplementation(m);
-            method_setImplementation(m, (IMP)(^(id self, SEL _cmd, SEL action, id target, UIEvent *event){
-                if ([self isKindOfClass:[UIButton class]]) {
-                    addLog(@"🖱️ 按钮点击: %@ -> %@.%@", NSStringFromClass([self class]), target ? NSStringFromClass([target class]) : @"nil", NSStringFromSelector(action));
-                }
-                orig(self, _cmd, action, target, event);
-            }));
+            orig_controlSendAction = (void (*)(id, SEL, SEL, id, id))method_getImplementation(m);
+            method_setImplementation(m, (IMP)swizzled_controlSendAction);
             addLog(@"✅ UIControl sendAction 已 hook");
         }
         
-        // 2. Hook WWWActivationViewController（UI层，主要入口）
         Class vcClass = objc_getClass("WWWActivationViewController");
         if (vcClass) hookVCClass(vcClass);
-        
-        // 3. Hook WWWActivation（逻辑层，备用）
-        Class logicClass = objc_getClass("WWWActivation");
-        if (logicClass) hookLogicClass(logicClass);
         
         addLog(@"🚀 初始化完成");
     });
