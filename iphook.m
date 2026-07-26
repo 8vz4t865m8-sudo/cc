@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun 真卡密记录版 v3-fix2 (闪退修复2)
-//  核心修复：activateCode:completion: 不再 wrap completion block
+//  iphook.m - KFun 真卡密记录版 v3-fix2 (编译修复)
+//  @[] → arrayWithObjects: 避免编译器不支持
 //
 
 #import <UIKit/UIKit.h>
@@ -12,7 +12,7 @@
 static UITextView *g_logView = nil;
 static UIView *g_logContainer = nil;
 static NSMutableString *g_logBuffer = nil;
-static __weak id g_wwwActivation = nil;  // 保存 WWWActivation 实例用于延迟快照
+static __weak id g_wwwActivation = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.3f] %@", [[NSDate date] timeIntervalSince1970], msg];
@@ -109,9 +109,6 @@ static void setupLogWindow() {
     });
 }
 
-// ============================================================
-// 通用工具
-// ============================================================
 static void snapshotProperties(id obj, NSString *label) {
     if (!obj) { LOG(@"❌ %@ nil", label); return; }
     LOG(@"📸 [%@] begin", label);
@@ -166,7 +163,10 @@ static void dumpViewHierarchy(UIView *view, NSString *label, int depth) {
 
 static void dumpAllWindows(NSString *label) {
     LOG(@"🪟 [%@] 所有窗口 begin", label);
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     NSArray *windows = [UIApplication sharedApplication].windows;
+    #pragma clang diagnostic pop
     for (UIWindow *w in windows) {
         LOG(@"  Window %@ | root=%@ | hidden=%d", NSStringFromClass([w class]), NSStringFromClass([w.rootViewController class]), (int)w.hidden);
         if (w.rootViewController) {
@@ -176,9 +176,6 @@ static void dumpAllWindows(NSString *label) {
     LOG(@"🪟 [%@] 所有窗口 end", label);
 }
 
-// ============================================================
-// 🔔 NSNotificationCenter 监控 (过滤系统通知)
-// ============================================================
 static IMP g_origPostNotification2 = NULL;
 
 static void hookNSNotificationCenter() {
@@ -191,7 +188,7 @@ static void hookNSNotificationCenter() {
         const char *te = method_getTypeEncoding(m2);
         IMP imp = imp_implementationWithBlock(^(id self, NSString *name, id obj, NSDictionary *ui) {
             BOOL isSystem = NO;
-            NSArray *sysPrefixes = @[@\"UI\", @\"NS\", @\"_UI\", @\"AX\", @\"kCA\", @\"CADisplay\", @\"UIApplication\", @\"UIWindow\", @\"UIText\", @\"UIKeyboard\", @\"UIScroll\", @\"UITable\", @\"UICollection\", @\"UIFocus\", @\"UITrait\", @\"UIViewController\", @\"UIScene\", @\"UIStatusBar\", @\"UINavigation\", @\"UITabBar\", @\"UIAlert\", @\"UIAction\", @\"UIPresentation\", @\"UIDevice\", @\"UIScreen\", @\"UIDisplay\"];
+            NSArray *sysPrefixes = [NSArray arrayWithObjects:@"UI", @"NS", @"_UI", @"AX", @"kCA", @"CADisplay", @"UIApplication", @"UIWindow", @"UIText", @"UIKeyboard", @"UIScroll", @"UITable", @"UICollection", @"UIFocus", @"UITrait", @"UIViewController", @"UIScene", @"UIStatusBar", @"UINavigation", @"UITabBar", @"UIAlert", @"UIAction", @"UIPresentation", @"UIDevice", @"UIScreen", @"UIDisplay", nil];
             for (NSString *p in sysPrefixes) {
                 if ([name hasPrefix:p]) { isSystem = YES; break; }
             }
@@ -213,7 +210,7 @@ static void hookNSNotificationCenter() {
         const char *te = method_getTypeEncoding(m3);
         IMP imp = imp_implementationWithBlock(^(id self, id observer, SEL sel, NSString *name, id obj) {
             BOOL isSystem = NO;
-            NSArray *sysPrefixes = @[@\"UI\", @\"NS\", @\"_UI\", @\"AX\", @\"kCA\", @\"CADisplay\", @\"UIApplication\", @\"UIWindow\", @\"UIText\", @\"UIKeyboard\", @\"UIScroll\", @\"UITable\", @\"UICollection\", @\"UIFocus\", @\"UITrait\", @\"UIViewController\", @\"UIScene\", @\"UIStatusBar\", @\"UINavigation\", @\"UITabBar\", @\"UIAlert\", @\"UIAction\", @\"UIPresentation\", @\"UIDevice\", @\"UIScreen\", @\"UIDisplay\"];
+            NSArray *sysPrefixes = [NSArray arrayWithObjects:@"UI", @"NS", @"_UI", @"AX", @"kCA", @"CADisplay", @"UIApplication", @"UIWindow", @"UIText", @"UIKeyboard", @"UIScroll", @"UITable", @"UICollection", @"UIFocus", @"UITrait", @"UIViewController", @"UIScene", @"UIStatusBar", @"UINavigation", @"UITabBar", @"UIAlert", @"UIAction", @"UIPresentation", @"UIDevice", @"UIScreen", @"UIDisplay", nil];
             for (NSString *p in sysPrefixes) {
                 if ([name hasPrefix:p]) { isSystem = YES; break; }
             }
@@ -228,9 +225,6 @@ static void hookNSNotificationCenter() {
     LOG(@"✅ NSNotificationCenter 已 Hook");
 }
 
-// ============================================================
-// 💾 NSUserDefaults 监控
-// ============================================================
 static void hookNSUserDefaults() {
     Class cls = [NSUserDefaults class];
     
@@ -272,9 +266,6 @@ static void hookNSUserDefaults() {
     LOG(@"✅ NSUserDefaults 已 Hook");
 }
 
-// ============================================================
-// 🌐 网络监控 (URL + Request)
-// ============================================================
 static void recordNetwork() {
     Class cls = [NSURLSession class];
     
@@ -328,16 +319,12 @@ static void recordNetwork() {
     LOG(@"✅ 网络记录已启用");
 }
 
-// ============================================================
-// 🎣 WWWActivation 类监控 (修复：不再 wrap completion block)
-// ============================================================
 static void hookWWWActivation(Class cls) {
     if (!cls) { LOG(@"❌ 未找到 WWWActivation"); return; }
     LOG(@"🎣 Hook WWWActivation: %s", class_getName(cls));
     
     Method m;
     
-    // ⭐ 修复：不再替换 completion block，直接调用原始方法
     m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -348,14 +335,12 @@ static void hookWWWActivation(Class cls) {
                 LOG(@"🎣   completion class = %@", NSStringFromClass([completion class]));
             }
             g_wwwActivation = self;
-            // 调用前快照
             snapshotProperties(self, @"WWWActivation(activateCode调用前)");
             
             id ret = ((id (*)(id, SEL, NSString*, id))orig)(self, @selector(activateCode:completion:), code, completion);
             
             LOG(@"🎣 [WWWActivation] activateCode 已调用，返回=%@", ret ? [NSString stringWithFormat:@"%@", ret] : @"nil");
             
-            // 延迟快照：0.5s / 1s / 2s / 3s 后检查属性变化
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (g_wwwActivation) snapshotProperties(g_wwwActivation, @"WWWActivation(activateCode+0.5s)");
             });
@@ -375,7 +360,6 @@ static void hookWWWActivation(Class cls) {
         LOG(@"  ✅ activateCode:completion:");
     }
     
-    // ⭐ 修复：同样不 wrap completion
     m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -422,7 +406,6 @@ static void hookWWWActivation(Class cls) {
         LOG(@"  ✅ activationStampPath");
     }
     
-    // Hook 所有 setter（只限本类）
     unsigned int mc = 0;
     Method *methods = class_copyMethodList(cls, &mc);
     for (unsigned int i = 0; i < mc; i++) {
@@ -444,9 +427,6 @@ static void hookWWWActivation(Class cls) {
     LOG(@"  ✅ 所有 setter 已 Hook");
 }
 
-// ============================================================
-// 🎣 WWWActivationViewController 监控
-// ============================================================
 static __weak id g_actVC = nil;
 
 static void hookActivationVC(Class cls) {
@@ -582,9 +562,6 @@ static void hookActivationVC(Class cls) {
     }
 }
 
-// ============================================================
-// 🎣 MainVC (ViewController) 监控
-// ============================================================
 static void hookViewController(Class cls) {
     if (!cls) { LOG(@"❌ 未找到 ViewController"); return; }
     LOG(@"🎣 Hook MainVC: %s", class_getName(cls));
@@ -667,7 +644,6 @@ static void hookViewController(Class cls) {
         LOG(@"  ✅ viewWillDisappear:");
     }
     
-    // Hook 所有 setter（只限本类）
     unsigned int mc = 0;
     Method *methods = class_copyMethodList(cls, &mc);
     for (unsigned int i = 0; i < mc; i++) {
@@ -689,9 +665,6 @@ static void hookViewController(Class cls) {
     LOG(@"  ✅ MainVC 所有 setter 已 Hook");
 }
 
-// ============================================================
-// 🎣 AppDelegate 监控
-// ============================================================
 static void hookAppDelegate() {
     Class cls = objc_getClass("AppDelegate");
     if (!cls) {
@@ -732,9 +705,6 @@ static void hookAppDelegate() {
     }
 }
 
-// ============================================================
-// 初始化
-// ============================================================
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
