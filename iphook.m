@@ -1,7 +1,6 @@
 //
-//  iphook.m - KFun 真卡密增强记录版 v3
-//  Theos / Dopamine / TrollStore 兼容
-//  目标：捕捉验证成功→主界面内容出现的完整调用链
+//  iphook.m - KFun 真卡密记录版 v3-fix (闪退修复)
+//  去掉了：hookDelays(performSelector:afterDelay) + hookAllActivationRelated(全类遍历)
 //
 
 #import <UIKit/UIKit.h>
@@ -66,24 +65,24 @@ static void setupLogWindow() {
             #pragma clang diagnostic pop
         }
         if (!keyWindow) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupLogWindow(); }); return; }
-        
+
         CGFloat w = 350, h = 300;
         g_logContainer = [[UIView alloc] initWithFrame:CGRectMake(8, 100, w, h)];
         g_logContainer.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.93];
         g_logContainer.layer.cornerRadius = 10;
         g_logContainer.layer.borderColor = [UIColor cyanColor].CGColor;
         g_logContainer.layer.borderWidth = 1.2;
-        
+
         UIView *titleBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 28)];
         titleBar.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
         [g_logContainer addSubview:titleBar];
-        
+
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v3 记录 (拖动)";
+        title.text = @"🔍 KFun v3-fix (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
-        
+
         UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
         copyBtn.frame = CGRectMake(w-70, 3, 65, 22);
         [copyBtn setTitle:@"📋复制" forState:UIControlStateNormal];
@@ -92,7 +91,7 @@ static void setupLogWindow() {
         g_dragHandler = [[LogDragHandler alloc] init];
         [copyBtn addTarget:g_dragHandler action:@selector(copyLog:) forControlEvents:UIControlEventTouchUpInside];
         [titleBar addSubview:copyBtn];
-        
+
         g_logView = [[UITextView alloc] initWithFrame:CGRectMake(2, 30, w-4, h-32)];
         g_logView.textColor = [UIColor greenColor];
         g_logView.font = [UIFont fontWithName:@"Menlo" size:8];
@@ -100,10 +99,10 @@ static void setupLogWindow() {
         g_logView.editable = NO;
         g_logView.selectable = YES;
         [g_logContainer addSubview:g_logView];
-        
+
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_dragHandler action:@selector(handlePan:)];
         [titleBar addGestureRecognizer:pan];
-        
+
         [keyWindow addSubview:g_logContainer];
         LOG(@"✅ 悬浮窗已启动");
     });
@@ -177,55 +176,55 @@ static void dumpAllWindows(NSString *label) {
 }
 
 // ============================================================
-// 🔔 NSNotificationCenter 监控
+// 🔔 NSNotificationCenter 监控 (精简版，只监控自定义通知)
 // ============================================================
-static IMP g_origPostNotification1 = NULL;
 static IMP g_origPostNotification2 = NULL;
-static IMP g_origPostNotification3 = NULL;
 
 static void hookNSNotificationCenter() {
     Class cls = objc_getClass("NSNotificationCenter");
     if (!cls) return;
-    
-    Method m1 = class_getInstanceMethod(cls, @selector(postNotificationName:object:));
-    if (m1) {
-        g_origPostNotification1 = method_getImplementation(m1);
-        const char *te = method_getTypeEncoding(m1);
-        IMP imp = imp_implementationWithBlock(^(id self, NSString *name, id obj) {
-            NSString *objStr = obj ? [NSString stringWithFormat:@"%@", obj] : @"nil";
-            if (objStr.length > 200) objStr = [objStr substringToIndex:200];
-            LOG(@"🔔 postNotification: name=%@ obj=%@", name, objStr);
-            ((void (*)(id, SEL, NSString*, id))g_origPostNotification1)(self, @selector(postNotificationName:object:), name, obj);
-        });
-        class_replaceMethod(cls, @selector(postNotificationName:object:), imp, te);
-    }
-    
+
     Method m2 = class_getInstanceMethod(cls, @selector(postNotificationName:object:userInfo:));
     if (m2) {
         g_origPostNotification2 = method_getImplementation(m2);
         const char *te = method_getTypeEncoding(m2);
         IMP imp = imp_implementationWithBlock(^(id self, NSString *name, id obj, NSDictionary *ui) {
-            NSString *objStr = obj ? [NSString stringWithFormat:@"%@", obj] : @"nil";
-            NSString *uiStr = ui ? [NSString stringWithFormat:@"%@", ui] : @"nil";
-            if (objStr.length > 200) objStr = [objStr substringToIndex:200];
-            if (uiStr.length > 500) uiStr = [uiStr substringToIndex:500];
-            LOG(@"🔔 postNotification: name=%@ obj=%@ userInfo=%@", name, objStr, uiStr);
+            // 只记录非系统高频通知
+            BOOL isSystem = NO;
+            NSArray *sysPrefixes = @[@"UI", @"NS", @"_UI", @"AX", @"kCA", @"CADisplay", @"UIApplication", @"UIWindow", @"UIText", @"UIKeyboard", @"UIScroll", @"UITable", @"UICollection", @"UIFocus", @"UITrait", @"UIViewController", @"UIScene", @"UIStatusBar", @"UINavigation", @"UITabBar", @"UIAlert", @"UIAction", @"UIPresentation", @"UIDevice", @"UIScreen", @"UIDisplay"];
+            for (NSString *p in sysPrefixes) {
+                if ([name hasPrefix:p]) { isSystem = YES; break; }
+            }
+            if (!isSystem) {
+                NSString *objStr = obj ? [NSString stringWithFormat:@"%@", obj] : @"nil";
+                NSString *uiStr = ui ? [NSString stringWithFormat:@"%@", ui] : @"nil";
+                if (objStr.length > 200) objStr = [objStr substringToIndex:200];
+                if (uiStr.length > 500) uiStr = [uiStr substringToIndex:500];
+                LOG(@"🔔 postNotification: name=%@ obj=%@ userInfo=%@", name, objStr, uiStr);
+            }
             ((void (*)(id, SEL, NSString*, id, NSDictionary*))g_origPostNotification2)(self, @selector(postNotificationName:object:userInfo:), name, obj, ui);
         });
         class_replaceMethod(cls, @selector(postNotificationName:object:userInfo:), imp, te);
     }
-    
+
     Method m3 = class_getInstanceMethod(cls, @selector(addObserver:selector:name:object:));
     if (m3) {
-        g_origPostNotification3 = method_getImplementation(m3);
+        IMP orig = method_getImplementation(m3);
         const char *te = method_getTypeEncoding(m3);
         IMP imp = imp_implementationWithBlock(^(id self, id observer, SEL sel, NSString *name, id obj) {
-            LOG(@"👂 addObserver: observer=%@ selector=%@ name=%@", NSStringFromClass([observer class]), NSStringFromSelector(sel), name);
-            ((void (*)(id, SEL, id, SEL, NSString*, id))g_origPostNotification3)(self, @selector(addObserver:selector:name:object:), observer, sel, name, obj);
+            BOOL isSystem = NO;
+            NSArray *sysPrefixes = @[@"UI", @"NS", @"_UI", @"AX", @"kCA", @"CADisplay", @"UIApplication", @"UIWindow", @"UIText", @"UIKeyboard", @"UIScroll", @"UITable", @"UICollection", @"UIFocus", @"UITrait", @"UIViewController", @"UIScene", @"UIStatusBar", @"UINavigation", @"UITabBar", @"UIAlert", @"UIAction", @"UIPresentation", @"UIDevice", @"UIScreen", @"UIDisplay"];
+            for (NSString *p in sysPrefixes) {
+                if ([name hasPrefix:p]) { isSystem = YES; break; }
+            }
+            if (!isSystem) {
+                LOG(@"👂 addObserver: observer=%@ selector=%@ name=%@", NSStringFromClass([observer class]), NSStringFromSelector(sel), name);
+            }
+            ((void (*)(id, SEL, id, SEL, NSString*, id))orig)(self, @selector(addObserver:selector:name:object:), observer, sel, name, obj);
         });
         class_replaceMethod(cls, @selector(addObserver:selector:name:object:), imp, te);
     }
-    
+
     LOG(@"✅ NSNotificationCenter 已 Hook");
 }
 
@@ -234,7 +233,7 @@ static void hookNSNotificationCenter() {
 // ============================================================
 static void hookNSUserDefaults() {
     Class cls = [NSUserDefaults class];
-    
+
     Method m1 = class_getInstanceMethod(cls, @selector(setObject:forKey:));
     if (m1) {
         IMP orig = method_getImplementation(m1);
@@ -247,7 +246,7 @@ static void hookNSUserDefaults() {
         });
         class_replaceMethod(cls, @selector(setObject:forKey:), imp, te);
     }
-    
+
     Method m2 = class_getInstanceMethod(cls, @selector(setBool:forKey:));
     if (m2) {
         IMP orig = method_getImplementation(m2);
@@ -258,7 +257,7 @@ static void hookNSUserDefaults() {
         });
         class_replaceMethod(cls, @selector(setBool:forKey:), imp, te);
     }
-    
+
     Method m3 = class_getInstanceMethod(cls, @selector(setInteger:forKey:));
     if (m3) {
         IMP orig = method_getImplementation(m3);
@@ -269,7 +268,7 @@ static void hookNSUserDefaults() {
         });
         class_replaceMethod(cls, @selector(setInteger:forKey:), imp, te);
     }
-    
+
     LOG(@"✅ NSUserDefaults 已 Hook");
 }
 
@@ -278,7 +277,7 @@ static void hookNSUserDefaults() {
 // ============================================================
 static void recordNetwork() {
     Class cls = [NSURLSession class];
-    
+
     Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
     if (m1) {
         IMP orig = method_getImplementation(m1);
@@ -298,7 +297,7 @@ static void recordNetwork() {
         });
         class_replaceMethod(cls, @selector(dataTaskWithURL:completionHandler:), imp, te);
     }
-    
+
     Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
     if (m2) {
         IMP orig = method_getImplementation(m2);
@@ -311,7 +310,7 @@ static void recordNetwork() {
             NSString *headers = req.allHTTPHeaderFields ? [NSString stringWithFormat:@"%@", req.allHTTPHeaderFields] : @"nil";
             if (headers.length > 300) headers = [headers substringToIndex:300];
             LOG(@"🌐 [REQ] %@ | method=%@ | body=%@ | headers=%@", req.URL.absoluteString, req.HTTPMethod, body?body:@"nil", headers);
-            
+
             id wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
                 NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
                 LOG(@"🌐 [REQ响应] %@ | %ld | %@", req.URL.absoluteString, (long)(http?http.statusCode:0), error?error.localizedDescription:@"ok");
@@ -325,39 +324,8 @@ static void recordNetwork() {
         });
         class_replaceMethod(cls, @selector(dataTaskWithRequest:completionHandler:), imp, te);
     }
-    
-    LOG(@"✅ 网络记录已启用");
-}
 
-// ============================================================
-// ⏰ 延迟调用监控
-// ============================================================
-static void hookDelays() {
-    Class cls = [NSObject class];
-    
-    Method m1 = class_getInstanceMethod(cls, @selector(performSelector:withObject:afterDelay:));
-    if (m1) {
-        IMP orig = method_getImplementation(m1);
-        const char *te = method_getTypeEncoding(m1);
-        IMP imp = imp_implementationWithBlock(^(id self, SEL sel, id obj, NSTimeInterval delay) {
-            LOG(@"⏰ performSelector:withObject:afterDelay: target=%@ sel=%@ delay=%.3f", NSStringFromClass([self class]), NSStringFromSelector(sel), delay);
-            ((void (*)(id, SEL, SEL, id, NSTimeInterval))orig)(self, @selector(performSelector:withObject:afterDelay:), sel, obj, delay);
-        });
-        class_replaceMethod(cls, @selector(performSelector:withObject:afterDelay:), imp, te);
-    }
-    
-    Method m2 = class_getInstanceMethod(cls, @selector(performSelector:afterDelay:));
-    if (m2) {
-        IMP orig = method_getImplementation(m2);
-        const char *te = method_getTypeEncoding(m2);
-        IMP imp = imp_implementationWithBlock(^(id self, SEL sel, NSTimeInterval delay) {
-            LOG(@"⏰ performSelector:afterDelay: target=%@ sel=%@ delay=%.3f", NSStringFromClass([self class]), NSStringFromSelector(sel), delay);
-            ((void (*)(id, SEL, SEL, NSTimeInterval))orig)(self, @selector(performSelector:afterDelay:), sel, delay);
-        });
-        class_replaceMethod(cls, @selector(performSelector:afterDelay:), imp, te);
-    }
-    
-    LOG(@"✅ 延迟调用已 Hook");
+    LOG(@"✅ 网络记录已启用");
 }
 
 // ============================================================
@@ -366,9 +334,9 @@ static void hookDelays() {
 static void hookWWWActivation(Class cls) {
     if (!cls) { LOG(@"❌ 未找到 WWWActivation"); return; }
     LOG(@"🎣 Hook WWWActivation: %s", class_getName(cls));
-    
+
     Method m;
-    
+
     m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -393,7 +361,7 @@ static void hookWWWActivation(Class cls) {
         class_replaceMethod(cls, @selector(activateCode:completion:), imp, te);
         LOG(@"  ✅ activateCode:completion:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -409,7 +377,7 @@ static void hookWWWActivation(Class cls) {
         class_replaceMethod(cls, @selector(verifyWithCompletion:), imp, te);
         LOG(@"  ✅ verifyWithCompletion:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(setupAfterActivation));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -423,7 +391,7 @@ static void hookWWWActivation(Class cls) {
         class_replaceMethod(cls, @selector(setupAfterActivation), imp, te);
         LOG(@"  ✅ setupAfterActivation");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(activationStampPath));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -436,8 +404,8 @@ static void hookWWWActivation(Class cls) {
         class_replaceMethod(cls, @selector(activationStampPath), imp, te);
         LOG(@"  ✅ activationStampPath");
     }
-    
-    // Hook 所有 setter
+
+    // Hook 所有 setter（只限本类，不递归父类）
     unsigned int mc = 0;
     Method *methods = class_copyMethodList(cls, &mc);
     for (unsigned int i = 0; i < mc; i++) {
@@ -467,9 +435,9 @@ static __weak id g_actVC = nil;
 static void hookActivationVC(Class cls) {
     if (!cls) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
     LOG(@"🎣 Hook ActVC: %s", class_getName(cls));
-    
+
     Method m;
-    
+
     m = class_getInstanceMethod(cls, @selector(viewDidLoad));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -484,7 +452,7 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(viewDidLoad), imp, te);
         LOG(@"  ✅ viewDidLoad");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(onTapVerify));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -499,7 +467,7 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(onTapVerify), imp, te);
         LOG(@"  ✅ onTapVerify");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(showError:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -512,7 +480,7 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(showError:), imp, te);
         LOG(@"  ✅ showError:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(showSuccess:completion:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -523,12 +491,12 @@ static void hookActivationVC(Class cls) {
             LOG(@"   completion class = %@", completion ? NSStringFromClass([completion class]) : @"nil");
             snapshotProperties(self, @"ActVC(showSuccess前)");
             snapshotIvars(self, @"ActVC(showSuccess前)");
-            
+
             id wrapped = ^(void) {
                 LOG(@"🎉 [ActVC] showSuccess completion block 执行！");
                 if (completion) ((void(^)(void))completion)();
             };
-            
+
             ((void (*)(id, SEL, id, id))orig)(self, @selector(showSuccess:completion:), expire, wrapped);
             LOG(@"🎉 [ActVC] showSuccess:completion: 执行完毕");
             snapshotProperties(self, @"ActVC(showSuccess后)");
@@ -537,7 +505,7 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(showSuccess:completion:), imp, te);
         LOG(@"  ✅ showSuccess:completion:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(buildSuccessViewWithExpire:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -551,7 +519,7 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(buildSuccessViewWithExpire:), imp, te);
         LOG(@"  ✅ buildSuccessViewWithExpire:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(setupAfterActivation));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -565,7 +533,7 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(setupAfterActivation), imp, te);
         LOG(@"  ✅ setupAfterActivation");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(setOnVerify:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -577,7 +545,7 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(setOnVerify:), imp, te);
         LOG(@"  ✅ setOnVerify:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(dismissViewControllerAnimated:completion:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -603,9 +571,9 @@ static void hookActivationVC(Class cls) {
 static void hookViewController(Class cls) {
     if (!cls) { LOG(@"❌ 未找到 ViewController"); return; }
     LOG(@"🎣 Hook MainVC: %s", class_getName(cls));
-    
+
     Method m;
-    
+
     m = class_getInstanceMethod(cls, @selector(viewDidLoad));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -620,7 +588,7 @@ static void hookViewController(Class cls) {
         class_replaceMethod(cls, @selector(viewDidLoad), imp, te);
         LOG(@"  ✅ viewDidLoad");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(viewWillAppear:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -633,7 +601,7 @@ static void hookViewController(Class cls) {
         class_replaceMethod(cls, @selector(viewWillAppear:), imp, te);
         LOG(@"  ✅ viewWillAppear:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -644,24 +612,32 @@ static void hookViewController(Class cls) {
             snapshotProperties(self, @"MainVC(viewDidAppear)");
             snapshotIvars(self, @"MainVC(viewDidAppear)");
             dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(viewDidAppear)", 0);
-            
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                LOG(@"🎯 [MainVC] viewDidAppear + 0.05s");
+                dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(+0.05s)", 0);
+            });
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 LOG(@"🎯 [MainVC] viewDidAppear + 0.1s");
                 dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(+0.1s)", 0);
             });
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                LOG(@"🎯 [MainVC] viewDidAppear + 0.3s");
-                dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(+0.3s)", 0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                LOG(@"🎯 [MainVC] viewDidAppear + 0.2s");
+                dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(+0.2s)", 0);
             });
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                LOG(@"🎯 [MainVC] viewDidAppear + 0.8s");
-                dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(+0.8s)", 0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                LOG(@"🎯 [MainVC] viewDidAppear + 0.5s");
+                dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(+0.5s)", 0);
+            });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                LOG(@"🎯 [MainVC] viewDidAppear + 1.0s");
+                dumpViewHierarchy(((UIViewController*)self).view, @"MainVC(+1.0s)", 0);
             });
         });
         class_replaceMethod(cls, @selector(viewDidAppear:), imp, te);
         LOG(@"  ✅ viewDidAppear:");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(viewWillDisappear:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -673,8 +649,8 @@ static void hookViewController(Class cls) {
         class_replaceMethod(cls, @selector(viewWillDisappear:), imp, te);
         LOG(@"  ✅ viewWillDisappear:");
     }
-    
-    // Hook 所有 setter
+
+    // Hook 所有 setter（只限本类）
     unsigned int mc = 0;
     Method *methods = class_copyMethodList(cls, &mc);
     for (unsigned int i = 0; i < mc; i++) {
@@ -707,9 +683,9 @@ static void hookAppDelegate() {
     }
     if (!cls) { LOG(@"⚠️ 未找到 AppDelegate"); return; }
     LOG(@"🎣 Hook AppDelegate: %s", class_getName(cls));
-    
+
     Method m;
-    
+
     m = class_getInstanceMethod(cls, @selector(application:didFinishLaunchingWithOptions:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -724,7 +700,7 @@ static void hookAppDelegate() {
         class_replaceMethod(cls, @selector(application:didFinishLaunchingWithOptions:), imp, te);
         LOG(@"  ✅ didFinishLaunchingWithOptions");
     }
-    
+
     m = class_getInstanceMethod(cls, @selector(applicationDidBecomeActive:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -740,71 +716,30 @@ static void hookAppDelegate() {
 }
 
 // ============================================================
-// 🎣 所有类的方法调用监控 (模糊匹配)
-// ============================================================
-static void hookAllActivationRelated() {
-    int classCount = objc_getClassList(NULL, 0);
-    if (classCount <= 0) return;
-    Class *classes = (Class *)malloc(sizeof(Class) * classCount);
-    objc_getClassList(classes, classCount);
-    
-    for (int i = 0; i < classCount; i++) {
-        NSString *name = NSStringFromClass(classes[i]);
-        if ([name containsString:@"Activation"] || [name containsString:@"Auth"] || [name containsString:@"Verify"] || [name containsString:@"License"] || [name containsString:@"Key"] || [name containsString:@"Token"] || [name containsString:@"Check"]) {
-            LOG(@"🔍 发现相关类: %@", name);
-            
-            unsigned int mc = 0;
-            Method *methods = class_copyMethodList(classes[i], &mc);
-            for (unsigned int j = 0; j < mc; j++) {
-                SEL sel = method_getName(methods[j]);
-                NSString *mname = NSStringFromSelector(sel);
-                if ([mname hasPrefix:@"set"] && [mname hasSuffix:@":"]) {
-                    const char *te = method_getTypeEncoding(methods[j]);
-                    IMP orig = method_getImplementation(methods[j]);
-                    IMP imp = imp_implementationWithBlock(^(id self, id val) {
-                        NSString *v = val ? [NSString stringWithFormat:@"%@", val] : @"nil";
-                        if (v.length > 200) v = [v substringToIndex:200];
-                        LOG(@"🔍 [%@] %@ = %@", name, mname, v);
-                        ((void (*)(id, SEL, id))orig)(self, sel, val);
-                    });
-                    class_replaceMethod(classes[i], sel, imp, te);
-                }
-            }
-            if (methods) free(methods);
-        }
-    }
-    free(classes);
-    LOG(@"✅ 所有 Activation/Auth/Verify 相关类 setter 已 Hook");
-}
-
-// ============================================================
 // 初始化
 // ============================================================
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunRecV3] 真卡密增强记录版 v3 已加载");
+    NSLog(@"[KFunRecV3] 真卡密增强记录版 v3-fix 已加载");
     NSLog(@"========================================");
-    
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupLogWindow();
         hookNSNotificationCenter();
         hookNSUserDefaults();
         recordNetwork();
-        hookDelays();
         hookAppDelegate();
-        
+
         Class actCls = objc_getClass("WWWActivation");
         if (actCls) hookWWWActivation(actCls);
-        
+
         Class vcClass = objc_getClass("WWWActivationViewController");
         if (vcClass) hookActivationVC(vcClass);
-        
+
         Class mainVC = objc_getClass("ViewController");
         if (mainVC) hookViewController(mainVC);
-        
-        hookAllActivationRelated();
-        
+
         LOG(@"🚀 增强记录系统已启动");
         LOG(@"📋 操作：输入真卡密 → 点验证 → 等主页面内容出现 → 点复制发给我");
     });
