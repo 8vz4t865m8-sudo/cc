@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass 修复版 v5
-//  根因：onVerify block 未执行导致主页面未初始化
+//  iphook.m - KFun Bypass 修复版 v6
+//  核心：探测 onVerify block 签名，安全调用，避免闪退
 //
 
 #import <UIKit/UIKit.h>
@@ -15,7 +15,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunFix] %@", line);
+    NSLog(@"[KFunV6] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 12000) {
@@ -78,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun 修复版 (拖动)";
+        title.text = @"🔍 KFun v6 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -108,6 +108,82 @@ static void setupLogWindow() {
     });
 }
 
+// ============================================================
+// ⭐ Block 签名探测（核心修复）
+// ============================================================
+struct Block_descriptor_v1 {
+    unsigned long int reserved;
+    unsigned long int size;
+    const char *signature;
+    const char *layout;
+};
+
+struct Block_literal {
+    void *isa;
+    int flags;
+    int reserved;
+    void (*invoke)(void *, ...);
+    struct Block_descriptor_v1 *descriptor;
+};
+
+#define BLOCK_HAS_SIGNATURE  (1 << 30)
+
+static const char *getBlockSignature(id blockObj) {
+    if (!blockObj) return NULL;
+    struct Block_literal *block = (struct Block_literal *)blockObj;
+    if (!(block->flags & BLOCK_HAS_SIGNATURE)) return NULL;
+    return block->descriptor->signature;
+}
+
+static void safeInvokeBlock(id blockObj) {
+    if (!blockObj) { LOG(@"⚠️ block 为 nil"); return; }
+    
+    const char *sig = getBlockSignature(blockObj);
+    LOG(@"⭐ Block 原始签名: %s", sig ? sig : "无");
+    
+    if (!sig) {
+        LOG(@"⚠️ 无法读取签名，放弃调用（避免闪退）");
+        return;
+    }
+    
+    // 解析签名，判断参数个数
+    // 签名格式示例: "v8@?0" (无参), "v16@?0@8" (1个对象参数), "v20@?0B8@12" (BOOL+对象)
+    // 简单判断：数 '@' 的个数（第一个是 block 自身 @?，后面是参数）
+    int paramCount = 0;
+    for (const char *p = sig; *p; p++) {
+        if (*p == '@') paramCount++;
+    }
+    // 第一个 @ 是 block 自己，所以实际参数 = paramCount - 1
+    int actualParams = paramCount - 1;
+    LOG(@"⭐ Block 参数个数估算: %d", actualParams);
+    
+    @try {
+        if (actualParams <= 0) {
+            // 无参
+            typedef void (^VoidBlock)(void);
+            VoidBlock blk = (VoidBlock)blockObj;
+            blk();
+            LOG(@"✅ 无参 block 调用成功");
+        } else if (actualParams == 1) {
+            // 1个参数，猜测是 NSString
+            typedef void (^OneParamBlock)(id);
+            OneParamBlock blk = (OneParamBlock)blockObj;
+            blk(@"2099-12-31 23:59:59");
+            LOG(@"✅ 1参 block 调用成功 (传 NSString)");
+        } else if (actualParams == 2) {
+            // 2个参数，猜测是 BOOL + NSString
+            typedef void (^TwoParamBlock)(BOOL, id);
+            TwoParamBlock blk = (TwoParamBlock)blockObj;
+            blk(YES, @"2099-12-31 23:59:59");
+            LOG(@"✅ 2参 block 调用成功 (传 BOOL+NSString)");
+        } else {
+            LOG(@"⚠️ 参数太多(%d)，放弃调用避免闪退", actualParams);
+        }
+    } @catch (NSException *e) {
+        LOG(@"❌ Block 调用失败: %@", e.reason);
+    }
+}
+
 static void snapshotProperties(id obj, NSString *label) {
     if (!obj) { LOG(@"❌ %@ nil", label); return; }
     LOG(@"📸 [%@] begin", label);
@@ -129,12 +205,11 @@ static void snapshotProperties(id obj, NSString *label) {
 }
 
 // ============================================================
-// 🚀 核心修复：执行 onVerify block 初始化主页面
+// 🚀 Bypass 核心
 // ============================================================
 static void doBypass(id vcInstance) {
     LOG(@"🚀 Bypass 开始");
     
-    // 1. 停止 spinner
     @try {
         id spinner = [vcInstance valueForKey:@"spinner"];
         if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
@@ -144,7 +219,6 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // 2. 隐藏错误
     @try {
         id errorLabel = [vcInstance valueForKey:@"errorLabel"];
         if (errorLabel && [errorLabel isKindOfClass:[UIView class]]) {
@@ -152,7 +226,6 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // 3. 隐藏遮罩
     @try {
         id mask = [vcInstance valueForKey:@"authMaskView"];
         if (mask && [mask isKindOfClass:[UIView class]]) {
@@ -162,7 +235,6 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // 4. 显示成功视图（可选，让用户体验正常）
     @try {
         if ([vcInstance respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
             [vcInstance performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
@@ -170,60 +242,20 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
-    // 5. ⭐ 关键修复：执行 onVerify block ⭐
+    // ⭐ 关键：安全调用 onVerify block
     @try {
         id onVerify = [vcInstance valueForKey:@"onVerify"];
         if (onVerify) {
-            LOG(@"⭐ 发现 onVerify block，准备执行...");
-            LOG(@"   block 类型: %@", NSStringFromClass([onVerify class]));
-            
-            // 尝试方式1：无参调用 (void)(^)(void)
-            @try {
-                typedef void (^VoidBlock)(void);
-                VoidBlock blk = (VoidBlock)onVerify;
-                blk();
-                LOG(@"✅ onVerify 无参调用成功");
-            } @catch (NSException *e1) {
-                LOG(@"❌ 无参调用失败: %@", e1.reason);
-                
-                // 尝试方式2：带 NSString 参数 (void)(^)(NSString *)
-                @try {
-                    typedef void (^StringBlock)(NSString *);
-                    StringBlock blk = (StringBlock)onVerify;
-                    blk(@"fake_code_12345");
-                    LOG(@"✅ onVerify 带NSString调用成功");
-                } @catch (NSException *e2) {
-                    LOG(@"❌ NSString参调用失败: %@", e2.reason);
-                    
-                    // 尝试方式3：带 BOOL + NSString (void)(^)(BOOL, NSString *)
-                    @try {
-                        typedef void (^BoolStringBlock)(BOOL, NSString *);
-                        BoolStringBlock blk = (BoolStringBlock)onVerify;
-                        blk(YES, @"2099-12-31");
-                        LOG(@"✅ onVerify 带BOOL+NSString调用成功");
-                    } @catch (NSException *e3) {
-                        LOG(@"❌ BOOL+NSString参调用失败: %@", e3.reason);
-                        
-                        // 尝试方式4：带 NSDictionary (void)(^)(NSDictionary *)
-                        @try {
-                            typedef void (^DictBlock)(NSDictionary *);
-                            DictBlock blk = (DictBlock)onVerify;
-                            blk(@{@"code":@"fake", @"expire":@"2099-12-31"});
-                            LOG(@"✅ onVerify 带NSDictionary调用成功");
-                        } @catch (NSException *e4) {
-                            LOG(@"❌ NSDictionary参调用失败: %@", e4.reason);
-                        }
-                    }
-                }
-            }
+            LOG(@"⭐ 发现 onVerify block");
+            safeInvokeBlock(onVerify);
         } else {
             LOG(@"⚠️ onVerify 为 nil");
         }
     } @catch (NSException *e) {
-        LOG(@"❌ 读取 onVerify 失败: %@", e.reason);
+        LOG(@"❌ 读取/调用 onVerify 失败: %@", e.reason);
     }
     
-    // 6. 延迟 dismiss 验证页
+    // 延迟 dismiss
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if ([vcInstance isKindOfClass:[UIViewController class]]) {
@@ -235,15 +267,13 @@ static void doBypass(id vcInstance) {
             }
         } @catch (NSException *e) {}
         
-        // 7. dismiss 后检查主页面状态
+        // dismiss 后检查主页面
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             Class mainVCClass = objc_getClass("ViewController");
-            // 遍历所有 window 找 ViewController 实例
-            NSArray *windows = [UIApplication sharedApplication].windows;
-            for (UIWindow *window in windows) {
+            for (UIWindow *window in [UIApplication sharedApplication].windows) {
                 UIViewController *root = window.rootViewController;
                 if ([root isKindOfClass:mainVCClass]) {
-                    LOG(@"🔍 找到主页面实例，检查状态...");
+                    LOG(@"🔍 找到主页面，检查状态...");
                     snapshotProperties(root, @"MainVC(修复后)");
                     break;
                 }
@@ -259,8 +289,22 @@ static void hookActivationVC(Class cls) {
     if (!cls) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
     LOG(@"🎣 Hook: %s", class_getName(cls));
     
-    // onTapVerify
-    Method m = class_getInstanceMethod(cls, @selector(onTapVerify));
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [ActVC] viewDidLoad");
+            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
+            snapshotProperties(self, @"ActVC(viewDidLoad)");
+        });
+        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
+        LOG(@"  ✅ viewDidLoad");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(onTapVerify));
     if (m) {
         const char *typeEnc = method_getTypeEncoding(m);
         IMP newIMP = imp_implementationWithBlock(^(id self) {
@@ -271,7 +315,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ onTapVerify");
     }
     
-    // showError:
     m = class_getInstanceMethod(cls, @selector(showError:));
     if (m) {
         const char *typeEnc = method_getTypeEncoding(m);
@@ -283,7 +326,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ showError:");
     }
     
-    // isActivated → YES
     m = class_getInstanceMethod(cls, @selector(isActivated));
     if (m) {
         const char *typeEnc = method_getTypeEncoding(m);
@@ -294,7 +336,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ isActivated -> YES");
     }
     
-    // isVerified → YES
     m = class_getInstanceMethod(cls, @selector(isVerified));
     if (m) {
         const char *typeEnc = method_getTypeEncoding(m);
@@ -342,7 +383,7 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunFix] v5 修复版已加载");
+    NSLog(@"[KFunV6] v6 Block探测版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
