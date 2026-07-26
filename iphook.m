@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass 修复版 v10
-//  核心：① viewDidLoad 前注入 state=1  ② 已加载的实例手动创建 tableView
+//  iphook.m - KFun Bypass 最终版 v11
+//  核心：安全无参调用 onVerify block + 手动 UI 兜底
 //
 
 #import <UIKit/UIKit.h>
@@ -15,7 +15,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV10] %@", line);
+    NSLog(@"[KFunV11] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 12000) {
@@ -78,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v10 (拖动)";
+        title.text = @"🔍 KFun v11 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -129,22 +129,21 @@ static void snapshotProperties(id obj, NSString *label) {
 }
 
 // ============================================================
-// ⭐ 手动创建缺失的 UI（兜底）
+// ⭐ 手动创建缺失 UI
 // ============================================================
-static void createMissingUI(id vc) {
+static void forceCreateUI(id vc) {
     if (!vc) return;
-    LOG(@"🔧 创建缺失的 UI...");
+    LOG(@"🔧 强制创建 UI...");
     
     UIView *view = nil;
     @try { view = [vc view]; } @catch (NSException *e) {}
     if (!view) { LOG(@"❌ view 为 nil"); return; }
     
-    // 1. 创建 tableView（如果缺失）
+    // 1. 创建 tableView
     @try {
         id tv = [vc valueForKey:@"tableView"];
         if (!tv) {
             CGRect frame = view.bounds;
-            // 留出顶部和底部空间（假设有导航栏和 tabBar）
             frame.origin.y = 60;
             frame.size.height -= 60 + 80;
             UITableView *tableView = [[UITableView alloc] initWithFrame:frame style:UITableViewStylePlain];
@@ -153,43 +152,34 @@ static void createMissingUI(id vc) {
             tableView.backgroundColor = [UIColor clearColor];
             [view addSubview:tableView];
             [vc setValue:tableView forKey:@"tableView"];
-            LOG(@"✅ tableView 已手动创建并添加");
-        } else {
-            LOG(@"✅ tableView 已存在");
+            LOG(@"✅ tableView 已创建");
         }
-    } @catch (NSException *e) {
-        LOG(@"❌ 创建 tableView 失败: %@", e.reason);
-    }
+    } @catch (NSException *e) { LOG(@"❌ tableView: %@", e.reason); }
     
-    // 2. 创建 langSeg（如果缺失）
+    // 2. 创建 langSeg
     @try {
         id seg = [vc valueForKey:@"langSeg"];
         if (!seg) {
             UISegmentedControl *langSeg = [[UISegmentedControl alloc] initWithItems:@[@"CN", @"EN"]];
-            CGRect frame = CGRectMake(16, 16, view.bounds.size.width - 32, 32);
-            langSeg.frame = frame;
+            langSeg.frame = CGRectMake(16, 16, view.bounds.size.width - 32, 32);
             [view addSubview:langSeg];
             [vc setValue:langSeg forKey:@"langSeg"];
-            LOG(@"✅ langSeg 已手动创建并添加");
-        } else {
-            LOG(@"✅ langSeg 已存在");
+            LOG(@"✅ langSeg 已创建");
         }
-    } @catch (NSException *e) {
-        LOG(@"❌ 创建 langSeg 失败: %@", e.reason);
-    }
+    } @catch (NSException *e) { LOG(@"❌ langSeg: %@", e.reason); }
     
-    // 3. 触发 reload
+    // 3. reload
     @try {
         id tv = [vc valueForKey:@"tableView"];
         if (tv && [tv isKindOfClass:[UITableView class]]) {
             [(UITableView *)tv reloadData];
-            LOG(@"✅ tableView reloadData");
+            LOG(@"✅ reloadData");
         }
     } @catch (NSException *e) {}
 }
 
 // ============================================================
-// 🚀 Bypass 核心（回到 v4 安全逻辑）
+// 🚀 Bypass 核心
 // ============================================================
 static void doBypass(id vcInstance) {
     LOG(@"🚀 Bypass 开始");
@@ -226,7 +216,25 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
-    // dismiss 后初始化主页面
+    // ⭐ 关键：安全调用 onVerify block（不碰内部结构，直接无参调用）
+    @try {
+        id onVerify = [vcInstance valueForKey:@"onVerify"];
+        if (onVerify) {
+            LOG(@"⭐ 尝试调用 onVerify (无参)...");
+            // 直接当作无参 block 调用，不读取内部结构
+            typedef void (^SimpleBlock)(void);
+            SimpleBlock blk = (SimpleBlock)onVerify;
+            blk();
+            LOG(@"✅ onVerify 调用成功！");
+        } else {
+            LOG(@"⚠️ onVerify 为 nil");
+        }
+    } @catch (NSException *e) {
+        LOG(@"❌ onVerify 调用失败: %@", e.reason);
+        LOG(@"   准备手动创建 UI...");
+    }
+    
+    // 延迟 dismiss + 兜底创建
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if ([vcInstance isKindOfClass:[UIViewController class]]) {
@@ -234,15 +242,13 @@ static void doBypass(id vcInstance) {
                 if (vc.presentingViewController) {
                     [vc dismissViewControllerAnimated:NO completion:^{
                         LOG(@"✅ dismiss 完成");
-                        // 找到主 VC 并修复
+                        // dismiss 后修复主页面
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                             Class mainVCClass = objc_getClass("ViewController");
                             for (UIWindow *window in [UIApplication sharedApplication].windows) {
                                 UIViewController *root = window.rootViewController;
                                 if ([root isKindOfClass:mainVCClass]) {
-                                    // 设置 state=1
-                                    @try { [root setValue:@(1) forKey:@"state"]; LOG(@"✅ state=1"); } @catch (NSException *e) {}
-                                    // 调用初始化方法
+                                    @try { [root setValue:@(1) forKey:@"state"]; } @catch (NSException *e) {}
                                     if ([root respondsToSelector:@selector(setupAfterActivation)]) {
                                         [root performSelector:@selector(setupAfterActivation)];
                                         LOG(@"✅ setupAfterActivation");
@@ -251,9 +257,8 @@ static void doBypass(id vcInstance) {
                                         [root performSelector:@selector(setupBackgroundKeepAlive)];
                                         LOG(@"✅ setupBackgroundKeepAlive");
                                     }
-                                    // 创建缺失的 UI
-                                    createMissingUI(root);
-                                    snapshotProperties(root, @"MainVC(修复后)");
+                                    forceCreateUI(root);
+                                    snapshotProperties(root, @"MainVC(最终)");
                                     break;
                                 }
                             }
@@ -336,24 +341,18 @@ static void hookViewController(Class cls) {
     
     Method m;
     
-    // ⭐ v10 双保险：① viewDidLoad 前注入 state  ② viewDidAppear 兜底创建 UI
     m = class_getInstanceMethod(cls, @selector(viewDidLoad));
     if (m) {
         IMP orig = method_getImplementation(m);
         const char *typeEnc = method_getTypeEncoding(m);
         IMP newIMP = imp_implementationWithBlock(^(id self) {
-            LOG(@"🎯 [MainVC] viewDidLoad (预注入)");
-            @try {
-                [self setValue:@(1) forKey:@"state"];
-                LOG(@"✅ state 预设为 1");
-            } @catch (NSException *e) {
-                LOG(@"❌ 预设 state: %@", e.reason);
-            }
+            LOG(@"🎯 [MainVC] viewDidLoad");
+            @try { [self setValue:@(1) forKey:@"state"]; LOG(@"✅ state=1"); } @catch (NSException *e) {}
             ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
             snapshotProperties(self, @"MainVC(viewDidLoad)");
         });
         class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
-        LOG(@"  ✅ viewDidLoad (预注入)");
+        LOG(@"  ✅ viewDidLoad");
     }
     
     m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
@@ -364,25 +363,24 @@ static void hookViewController(Class cls) {
             LOG(@"🎯 [MainVC] viewDidAppear:");
             ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
             snapshotProperties(self, @"MainVC(viewDidAppear)");
-            
-            // 兜底：如果 tableView 还是 nil，手动创建
+            // 兜底
             @try {
                 id tv = [self valueForKey:@"tableView"];
                 if (!tv) {
-                    LOG(@"⚠️ tableView 为 nil，触发兜底创建");
-                    createMissingUI(self);
+                    LOG(@"⚠️ tableView nil，强制创建");
+                    forceCreateUI(self);
                 }
             } @catch (NSException *e) {}
         });
         class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
-        LOG(@"  ✅ viewDidAppear: (兜底创建)");
+        LOG(@"  ✅ viewDidAppear:");
     }
 }
 
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV10] v10 双保险版已加载");
+    NSLog(@"[KFunV11] v11 最终版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
