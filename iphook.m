@@ -1,11 +1,12 @@
 //
-//  iphook.m - KFun Bypass 修复版 v7
-//  修复：block descriptor 布局错误导致读取 signature 时 SIGBUS 闪退
+//  iphook.m - KFun Bypass 修复版 v8
+//  核心：dlsym 获取 block_getType_np 安全读签名，避免 C 指针硬读导致 SIGBUS
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <dlfcn.h>
 
 #define LOG(fmt, ...) logLine([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
@@ -15,7 +16,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV7] %@", line);
+    NSLog(@"[KFunV8] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 12000) {
@@ -78,7 +79,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v7 (拖动)";
+        title.text = @"🔍 KFun v8 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -109,52 +110,39 @@ static void setupLogWindow() {
 }
 
 // ============================================================
-// ⭐ Block 签名探测（修复 descriptor 布局）
+// ⭐ 安全读取 Block 签名（dlsym 获取 Apple 私有 API）
 // ============================================================
-#define BLOCK_HAS_COPY_DISPOSE  (1 << 25)
-#define BLOCK_HAS_SIGNATURE     (1 << 30)
-
-struct Block_literal {
-    void *isa;
-    int flags;
-    int reserved;
-    void (*invoke)(void *, ...);
-    void *descriptor;
-};
-
-static const char *getBlockSignature(id blockObj) {
+static const char *safeGetBlockSignature(id blockObj) {
     if (!blockObj) return NULL;
-    struct Block_literal *block = (__bridge struct Block_literal *)blockObj;
-    if (!(block->flags & BLOCK_HAS_SIGNATURE)) return NULL;
     
-    // descriptor 基地址，手动计算 signature 指针的偏移
-    uintptr_t ptr = (uintptr_t)block->descriptor;
-    ptr += sizeof(unsigned long int); // reserved
-    ptr += sizeof(unsigned long int); // size
+    // 用 dlsym 安全获取 block_getType_np，避免硬读内存布局
+    static const char *(*block_getType_np)(const void *) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        block_getType_np = dlsym(RTLD_DEFAULT, "block_getType_np");
+    });
     
-    // 如果有 copy/dispose helpers，跳过两个函数指针
-    if (block->flags & BLOCK_HAS_COPY_DISPOSE) {
-        ptr += sizeof(void *); // copy helper
-        ptr += sizeof(void *); // dispose helper
+    if (!block_getType_np) {
+        LOG(@"⚠️ block_getType_np 不存在");
+        return NULL;
     }
     
-    // 现在 ptr 指向 signature 指针的存储位置
-    const char **sigPtr = (const char **)ptr;
-    return *sigPtr;
+    const char *sig = block_getType_np((__bridge void *)blockObj);
+    return sig;
 }
 
 static void safeInvokeBlock(id blockObj) {
     if (!blockObj) { LOG(@"⚠️ block 为 nil"); return; }
     
-    const char *sig = getBlockSignature(blockObj);
-    LOG(@"⭐ Block 原始签名: %s", sig ? sig : "无");
+    const char *sig = safeGetBlockSignature(blockObj);
+    LOG(@"⭐ Block 签名: %s", sig ? sig : "无");
     
     if (!sig) {
-        LOG(@"⚠️ 无法读取签名，放弃调用");
+        LOG(@"⚠️ 读不到签名，放弃调用");
         return;
     }
     
-    // 数 '@' 个数估算参数（第一个是 block 自身 @?）
+    // 解析签名：数 '@' 个数（第一个是 block 自身 @?）
     int paramCount = 0;
     for (const char *p = sig; *p; p++) {
         if (*p == '@') paramCount++;
@@ -383,7 +371,7 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV7] v7 BlockDescriptor修复版已加载");
+    NSLog(@"[KFunV8] v8 dlsym安全版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
