@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun 全自动 Bypass（打开 App 2 秒后自动进入）
-//  不依赖任何类名/方法名，通过特征识别验证界面
+//  iphook.m - KFun Bypass 精准版
+//  只 hook WWWActivation 类，不碰系统类，模拟完整验证流程
 //
 
 #import <UIKit/UIKit.h>
@@ -9,202 +9,170 @@
 
 #define LOG(fmt, ...) NSLog(@"[IPH] " fmt, ##__VA_ARGS__)
 
-// ============================================================
-// 核心 bypass：强制移除遮罩 + 停止转圈 + 进入主界面
-// ============================================================
-static void forceBypass(id target) {
+// 模拟完整验证成功流程
+static void simulateSuccess(id self) {
     dispatch_async(dispatch_get_main_queue(), ^{
         
-        // 1. 停止所有 ActivityIndicatorView 的转圈
-        if ([target isKindOfClass:[UIViewController class]]) {
-            UIViewController *vc = (UIViewController *)target;
-            for (UIView *subview in vc.view.subviews) {
-                if ([subview isKindOfClass:[UIActivityIndicatorView class]]) {
-                    [(UIActivityIndicatorView *)subview stopAnimating];
-                    subview.hidden = YES;
-                    LOG(@"停止转圈");
-                }
-            }
-            // 递归停止子视图中的转圈
-            void (^stopAllSpinners)(UIView *) = ^(UIView *view) {
-                for (UIView *v in view.subviews) {
-                    if ([v isKindOfClass:[UIActivityIndicatorView class]]) {
-                        [(UIActivityIndicatorView *)v stopAnimating];
-                        v.hidden = YES;
-                    }
-                    stopAllSpinners(v);
-                }
-            };
-            stopAllSpinners(vc.view);
+        // 1. 停止转圈
+        id spinner = nil;
+        @try { spinner = [self valueForKey:@"spinner"]; } @catch (NSException *e) {}
+        if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
+            [(UIActivityIndicatorView *)spinner stopAnimating];
+            [(UIActivityIndicatorView *)spinner setHidden:YES];
+            LOG(@"转圈已停止");
         }
         
-        // 2. 通过 KVC 尝试获取并隐藏 authMaskView
-        id mask = nil;
-        @try { mask = [target valueForKey:@"authMaskView"]; } @catch (NSException *e) {}
-        if (mask && [mask isKindOfClass:[UIView class]]) {
-            [(UIView *)mask setHidden:YES];
-            [(UIView *)mask removeFromSuperview];
-            LOG(@"authMaskView 已移除");
+        // 2. 关闭 loading 状态
+        if ([self respondsToSelector:@selector(setLoading:)]) {
+            @try { [self performSelector:@selector(setLoading:) withObject:@NO]; } @catch (NSException *e) {}
         }
         
-        // 3. 隐藏 errorLabel
+        // 3. 隐藏错误提示
         id errorLabel = nil;
-        @try { errorLabel = [target valueForKey:@"errorLabel"]; } @catch (NSException *e) {}
+        @try { errorLabel = [self valueForKey:@"errorLabel"]; } @catch (NSException *e) {}
         if (errorLabel && [errorLabel isKindOfClass:[UIView class]]) {
             [(UIView *)errorLabel setHidden:YES];
         }
         
-        // 4. 隐藏 successView
-        id successView = nil;
-        @try { successView = [target valueForKey:@"successView"]; } @catch (NSException *e) {}
-        if (successView && [successView isKindOfClass:[UIView class]]) {
-            [(UIView *)successView setHidden:YES];
-            [(UIView *)successView removeFromSuperview];
-        }
-        
-        // 5. 调用 buildSuccessViewWithExpire:（如果存在）
-        if ([target respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+        // 4. 显示成功弹窗（带过期时间）—— 这是关键！
+        if ([self respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
             @try {
-                [target performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
-                LOG(@"buildSuccessViewWithExpire: 已调用");
-            } @catch (NSException *e) {}
-        }
-        
-        // 6. 调用 setupAfterActivation（关键：启动雷达核心逻辑）
-        if ([target respondsToSelector:@selector(setupAfterActivation)]) {
-            @try {
-                [target performSelector:@selector(setupAfterActivation)];
-                LOG(@"setupAfterActivation 已调用，雷达应该启动了");
+                [self performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
+                LOG(@"✅ 成功弹窗已显示");
             } @catch (NSException *e) {
-                LOG(@"setupAfterActivation 失败: %@", e);
+                LOG(@"buildSuccessViewWithExpire: 失败: %@", e);
             }
         }
         
-        // 7. 尝试关闭验证弹窗
-        @try {
-            if ([target isKindOfClass:[UIViewController class]]) {
-                UIViewController *vc = (UIViewController *)target;
-                if (vc.presentingViewController) {
-                    [vc dismissViewControllerAnimated:NO completion:nil];
-                    LOG(@"验证弹窗已关闭");
+        // 5. 延迟 2 秒，等成功弹窗自带的定时器触发进入主界面
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            
+            LOG(@"🚀 尝试进入主界面...");
+            
+            // 尝试关闭验证界面（各种方式）
+            @try {
+                if ([self isKindOfClass:[UIViewController class]]) {
+                    UIViewController *vc = (UIViewController *)self;
+                    
+                    // 方式1：如果是 present 出来的，dismiss
+                    if (vc.presentingViewController) {
+                        [vc dismissViewControllerAnimated:NO completion:nil];
+                        LOG(@"验证界面已 dismiss");
+                    }
+                    // 方式2：如果在导航栈里，pop
+                    else if (vc.navigationController) {
+                        [vc.navigationController popViewControllerAnimated:NO];
+                        LOG(@"验证界面已 pop");
+                    }
+                    // 方式3：从父视图移除
+                    else {
+                        [vc.view removeFromSuperview];
+                        LOG(@"验证界面视图已移除");
+                    }
+                }
+            } @catch (NSException *e) {}
+            
+            // 6. 尝试启动雷达核心逻辑
+            if ([self respondsToSelector:@selector(setupAfterActivation)]) {
+                @try {
+                    [self performSelector:@selector(setupAfterActivation)];
+                    LOG(@"✅ setupAfterActivation 已调用，雷达启动");
+                } @catch (NSException *e) {
+                    LOG(@"setupAfterActivation 失败: %@", e);
                 }
             }
-        } @catch (NSException *e) {}
+        });
     });
 }
 
-// ============================================================
-// Hook 1: 拦截所有按钮点击（保险机制）
-// ============================================================
-static BOOL (*orig_sendAction)(id, SEL, SEL, id, id, UIEvent *);
-
-static BOOL hook_sendAction(id self, SEL _cmd, SEL action, id target, id sender, UIEvent *event) {
-    NSString *actionName = NSStringFromSelector(action);
+// Hook viewDidLoad —— 验证界面创建时自动触发
+static void hook_viewDidLoad(id self, SEL _cmd) {
+    // 调用原方法
+    struct objc_super super = {self, class_getSuperclass(object_getClass(self))};
+    ((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&super, _cmd);
     
-    // 如果点击的是验证相关按钮，直接 bypass
-    if ([actionName rangeOfString:@"Verify" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [actionName rangeOfString:@"verify" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [actionName rangeOfString:@"activate" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [actionName rangeOfString:@"tap" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [actionName rangeOfString:@"submit" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [actionName rangeOfString:@"confirm" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [actionName rangeOfString:@"login" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-        
-        LOG(@"🎯 拦截按钮点击: %@, target=%@", actionName, target);
-        forceBypass(target);
-        return YES; // 吃掉事件，不让原生处理
-    }
-    
-    return orig_sendAction(self, _cmd, action, target, sender, event);
+    LOG(@"🎯 viewDidLoad 触发，自动模拟验证成功");
+    simulateSuccess(self);
 }
 
-// ============================================================
-// Hook 2: 验证界面出现时自动 bypass（主要机制）
-// ============================================================
-static void (*orig_viewDidAppear)(id, SEL, BOOL);
-
+// Hook viewDidAppear —— 验证界面显示时触发（备用）
 static void hook_viewDidAppear(id self, SEL _cmd, BOOL animated) {
-    orig_viewDidAppear(self, _cmd, animated);
+    struct objc_super super = {self, class_getSuperclass(object_getClass(self))};
+    ((void (*)(struct objc_super *, SEL, BOOL))objc_msgSendSuper)(&super, _cmd, animated);
     
-    // 检查这个 VC 是否有验证界面的特征（authMaskView 或 codeField）
-    id mask = nil;
-    @try { mask = [self valueForKey:@"authMaskView"]; } @catch (NSException *e) {}
-    id codeField = nil;
-    @try { codeField = [self valueForKey:@"codeField"]; } @catch (NSException *e) {}
-    id verifyBtn = nil;
-    @try { verifyBtn = [self valueForKey:@"verifyButton"]; } @catch (NSException *e) {}
+    LOG(@"🎯 viewDidAppear 触发");
+    simulateSuccess(self);
+}
+
+// Hook onTapVerify —— 如果用户手动点击验证按钮
+static void hook_onTapVerify(id self, SEL _cmd) {
+    LOG(@"🎯 onTapVerify 被拦截");
+    simulateSuccess(self);
+}
+
+// Hook activateCode:completion: —— 代码调用入口
+static void hook_activateCode(id self, SEL _cmd, NSString *code, id completion) {
+    LOG(@"🎯 activateCode: 被拦截");
+    simulateSuccess(self);
+    // ❌ 不调用原生的 completion，避免 block 签名问题
+}
+
+// 安装 Hook
+static void installHook(Class cls) {
+    if (!cls) return;
+    LOG(@"✅ 找到类: %s", class_getName(cls));
     
-    if (mask || codeField || verifyBtn) {
-        LOG(@"🎯 检测到验证界面: %@, 2秒后自动 bypass", NSStringFromClass([self class]));
-        
-        // 延迟 2 秒，等界面完全加载
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            forceBypass(self);
-        });
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        method_setImplementation(m, (IMP)hook_viewDidLoad);
+        LOG(@"✅ Hooked viewDidLoad");
     }
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+    if (m) {
+        method_setImplementation(m, (IMP)hook_viewDidAppear);
+        LOG(@"✅ Hooked viewDidAppear");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(onTapVerify));
+    if (m) {
+        method_setImplementation(m, (IMP)hook_onTapVerify);
+        LOG(@"✅ Hooked onTapVerify");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
+    if (m) {
+        method_setImplementation(m, (IMP)hook_activateCode);
+        LOG(@"✅ Hooked activateCode:");
+    }
+    
+    LOG(@"🚀 Hook 安装完成，等待验证界面出现...");
 }
 
-// ============================================================
-// Hook 3: 定时轮询（兜底机制）
-// ============================================================
-static void startPolling() {
-    [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *timer) {
-        // 遍历所有窗口
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            UIViewController *topVC = window.rootViewController;
-            // 找到最上层的 presentedViewController
-            while (topVC.presentedViewController) {
-                topVC = topVC.presentedViewController;
-            }
-            
-            // 检查是否是验证界面
-            id mask = nil;
-            @try { mask = [topVC valueForKey:@"authMaskView"]; } @catch (NSException *e) {}
-            id codeField = nil;
-            @try { codeField = [topVC valueForKey:@"codeField"]; } @catch (NSException *e) {}
-            
-            if (mask || codeField) {
-                LOG(@"🎯 轮询检测到验证界面，自动 bypass");
-                forceBypass(topVC);
-                return;
-            }
-        }
-    }];
-    LOG(@"✅ 轮询已启动");
-}
-
-// ============================================================
-// 初始化
-// ============================================================
 __attribute__((constructor))
 static void iphook_init() {
     LOG(@"========================================");
-    LOG(@"KFun 全自动 Bypass 已加载");
+    LOG(@"KFun Bypass 精准版已加载");
     LOG(@"========================================");
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 延迟 0.3 秒等类加载
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         
-        // 1. Hook UIApplication sendAction（拦截按钮点击）
-        Class appClass = [UIApplication class];
-        Method m1 = class_getInstanceMethod(appClass, @selector(sendAction:to:from:forEvent:));
-        if (m1) {
-            orig_sendAction = (BOOL (*)(id, SEL, SEL, id, id, UIEvent *))method_getImplementation(m1);
-            method_setImplementation(m1, (IMP)hook_sendAction);
-            LOG(@"✅ sendAction 已 hook");
+        // 尝试 WWWActivation
+        Class cls = objc_getClass("WWWActivation");
+        if (!cls) cls = objc_getClass("WWWActivationViewController");
+        
+        if (cls) {
+            installHook(cls);
+        } else {
+            LOG(@"⚠️ 未找到验证类，1秒后重试...");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                Class cls2 = objc_getClass("WWWActivation");
+                if (!cls2) cls2 = objc_getClass("WWWActivationViewController");
+                installHook(cls2);
+            });
         }
-        
-        // 2. Hook UIViewController viewDidAppear（界面出现时自动 bypass）
-        Class vcClass = [UIViewController class];
-        Method m2 = class_getInstanceMethod(vcClass, @selector(viewDidAppear:));
-        if (m2) {
-            orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(m2);
-            method_setImplementation(m2, (IMP)hook_viewDidAppear);
-            LOG(@"✅ viewDidAppear 已 hook");
-        }
-        
-        // 3. 启动轮询
-        startPolling();
-        
-        LOG(@"🚀 全部就绪，打开验证界面后 2 秒自动进入");
     });
 }
