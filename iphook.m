@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass 修复版 v6-fix
-//  修复：ARC 桥接转换 (__bridge)
+//  iphook.m - KFun Bypass 修复版 v7
+//  修复：block descriptor 布局错误导致读取 signature 时 SIGBUS 闪退
 //
 
 #import <UIKit/UIKit.h>
@@ -15,7 +15,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV6] %@", line);
+    NSLog(@"[KFunV7] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 12000) {
@@ -78,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v6 (拖动)";
+        title.text = @"🔍 KFun v7 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -109,30 +109,38 @@ static void setupLogWindow() {
 }
 
 // ============================================================
-// ⭐ Block 签名探测
+// ⭐ Block 签名探测（修复 descriptor 布局）
 // ============================================================
-struct Block_descriptor_v1 {
-    unsigned long int reserved;
-    unsigned long int size;
-    const char *signature;
-    const char *layout;
-};
+#define BLOCK_HAS_COPY_DISPOSE  (1 << 25)
+#define BLOCK_HAS_SIGNATURE     (1 << 30)
 
 struct Block_literal {
     void *isa;
     int flags;
     int reserved;
     void (*invoke)(void *, ...);
-    struct Block_descriptor_v1 *descriptor;
+    void *descriptor;
 };
-
-#define BLOCK_HAS_SIGNATURE  (1 << 30)
 
 static const char *getBlockSignature(id blockObj) {
     if (!blockObj) return NULL;
     struct Block_literal *block = (__bridge struct Block_literal *)blockObj;
     if (!(block->flags & BLOCK_HAS_SIGNATURE)) return NULL;
-    return block->descriptor->signature;
+    
+    // descriptor 基地址，手动计算 signature 指针的偏移
+    uintptr_t ptr = (uintptr_t)block->descriptor;
+    ptr += sizeof(unsigned long int); // reserved
+    ptr += sizeof(unsigned long int); // size
+    
+    // 如果有 copy/dispose helpers，跳过两个函数指针
+    if (block->flags & BLOCK_HAS_COPY_DISPOSE) {
+        ptr += sizeof(void *); // copy helper
+        ptr += sizeof(void *); // dispose helper
+    }
+    
+    // 现在 ptr 指向 signature 指针的存储位置
+    const char **sigPtr = (const char **)ptr;
+    return *sigPtr;
 }
 
 static void safeInvokeBlock(id blockObj) {
@@ -142,16 +150,17 @@ static void safeInvokeBlock(id blockObj) {
     LOG(@"⭐ Block 原始签名: %s", sig ? sig : "无");
     
     if (!sig) {
-        LOG(@"⚠️ 无法读取签名，放弃调用（避免闪退）");
+        LOG(@"⚠️ 无法读取签名，放弃调用");
         return;
     }
     
+    // 数 '@' 个数估算参数（第一个是 block 自身 @?）
     int paramCount = 0;
     for (const char *p = sig; *p; p++) {
         if (*p == '@') paramCount++;
     }
     int actualParams = paramCount - 1;
-    LOG(@"⭐ Block 参数个数估算: %d", actualParams);
+    LOG(@"⭐ Block 参数个数: %d", actualParams);
     
     @try {
         if (actualParams <= 0) {
@@ -163,14 +172,14 @@ static void safeInvokeBlock(id blockObj) {
             typedef void (^OneParamBlock)(id);
             OneParamBlock blk = (OneParamBlock)blockObj;
             blk(@"2099-12-31 23:59:59");
-            LOG(@"✅ 1参 block 调用成功 (传 NSString)");
+            LOG(@"✅ 1参 block 调用成功");
         } else if (actualParams == 2) {
             typedef void (^TwoParamBlock)(BOOL, id);
             TwoParamBlock blk = (TwoParamBlock)blockObj;
             blk(YES, @"2099-12-31 23:59:59");
-            LOG(@"✅ 2参 block 调用成功 (传 BOOL+NSString)");
+            LOG(@"✅ 2参 block 调用成功");
         } else {
-            LOG(@"⚠️ 参数太多(%d)，放弃调用避免闪退", actualParams);
+            LOG(@"⚠️ 参数太多(%d)，放弃调用", actualParams);
         }
     } @catch (NSException *e) {
         LOG(@"❌ Block 调用失败: %@", e.reason);
@@ -235,6 +244,7 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
+    // ⭐ 安全调用 onVerify block
     @try {
         id onVerify = [vcInstance valueForKey:@"onVerify"];
         if (onVerify) {
@@ -244,7 +254,7 @@ static void doBypass(id vcInstance) {
             LOG(@"⚠️ onVerify 为 nil");
         }
     } @catch (NSException *e) {
-        LOG(@"❌ 读取/调用 onVerify 失败: %@", e.reason);
+        LOG(@"❌ onVerify 异常: %@", e.reason);
     }
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -373,7 +383,7 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV6] v6-fix 已加载");
+    NSLog(@"[KFunV7] v7 BlockDescriptor修复版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
