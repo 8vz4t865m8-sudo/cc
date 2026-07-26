@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass 修复版 v9
-//  核心：放弃调用 onVerify，改为手动初始化 ViewController
+//  iphook.m - KFun Bypass 修复版 v10
+//  核心：在 ViewController.viewDidLoad 执行前预设 state=1，让原生逻辑创建 UI
 //
 
 #import <UIKit/UIKit.h>
@@ -15,7 +15,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV9] %@", line);
+    NSLog(@"[KFunV10] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 12000) {
@@ -78,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v9 (拖动)";
+        title.text = @"🔍 KFun v10 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -129,89 +129,7 @@ static void snapshotProperties(id obj, NSString *label) {
 }
 
 // ============================================================
-// ⭐ 手动初始化 ViewController
-// ============================================================
-static void initViewController(id vc) {
-    if (!vc) { LOG(@"❌ ViewController 实例 nil"); return; }
-    LOG(@"🔧 开始手动初始化 ViewController");
-    
-    // 1. 设置 state = 1（验证成功状态）
-    @try {
-        [vc setValue:@(1) forKey:@"state"];
-        LOG(@"✅ state 已设为 1");
-    } @catch (NSException *e) {
-        LOG(@"❌ 设置 state 失败: %@", e.reason);
-    }
-    
-    // 2. 尝试调用各种初始化方法
-    NSArray *initMethods = @[
-        @"setupBackgroundKeepAlive",
-        @"setUpAudioSession",
-        @"startRunInbackGround",
-        @"audioPlay",
-        @"setupAfterActivation",
-        @"setup",
-        @"reloadData"
-    ];
-    for (NSString *selName in initMethods) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([vc respondsToSelector:sel]) {
-            @try {
-                [vc performSelector:sel];
-                LOG(@"✅ %@ 已调用", selName);
-            } @catch (NSException *e) {
-                LOG(@"❌ %@ 失败: %@", selName, e.reason);
-            }
-        } else {
-            LOG(@"⚠️ %@ 不存在", selName);
-        }
-    }
-    
-    // 3. 尝试触发 tableView 懒加载
-    @try {
-        if ([vc respondsToSelector:@selector(tableView)]) {
-            id tv = [vc performSelector:@selector(tableView)];
-            LOG(@"✅ tableView getter 返回: %@", tv ? @"非nil" : @"nil");
-            if (tv && [tv isKindOfClass:[UITableView class]]) {
-                [(UITableView *)tv reloadData];
-                LOG(@"✅ tableView reloadData 已调用");
-            }
-        }
-    } @catch (NSException *e) {
-        LOG(@"❌ tableView 操作失败: %@", e.reason);
-    }
-    
-    // 4. 设置状态文本
-    @try {
-        if ([vc respondsToSelector:@selector(setStatusText:)]) {
-            [vc performSelector:@selector(setStatusText:) withObject:@"已连接"];
-            LOG(@"✅ statusText 已设置");
-        }
-        if ([vc respondsToSelector:@selector(setDataText:)]) {
-            [vc performSelector:@selector(setDataText:) withObject:@"等待数据..."];
-            LOG(@"✅ dataText 已设置");
-        }
-    } @catch (NSException *e) {
-        LOG(@"❌ 设置文本失败: %@", e.reason);
-    }
-    
-    // 5. 尝试触发 langSeg
-    @try {
-        if ([vc respondsToSelector:@selector(setLangSeg:)]) {
-            LOG(@"✅ setLangSeg: 存在");
-        }
-        id langSeg = [vc valueForKey:@"langSeg"];
-        LOG(@"   langSeg 当前值: %@", langSeg ? @"非nil" : @"nil");
-    } @catch (NSException *e) {}
-    
-    // 6. 快照检查
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        snapshotProperties(vc, @"MainVC(手动初始化后)");
-    });
-}
-
-// ============================================================
-// 🚀 Bypass 核心（回到 v4 安全逻辑）
+// 🚀 Bypass 核心（v4 安全逻辑）
 // ============================================================
 static void doBypass(id vcInstance) {
     LOG(@"🚀 Bypass 开始");
@@ -248,36 +166,13 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
-    // 延迟 dismiss 后初始化主页面
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if ([vcInstance isKindOfClass:[UIViewController class]]) {
                 UIViewController *vc = (UIViewController *)vcInstance;
                 if (vc.presentingViewController) {
-                    [vc dismissViewControllerAnimated:NO completion:^{
-                        LOG(@"✅ dismiss 完成");
-                        // dismiss 后找到主 VC 并初始化
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            Class mainVCClass = objc_getClass("ViewController");
-                            for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                                UIViewController *root = window.rootViewController;
-                                if ([root isKindOfClass:mainVCClass]) {
-                                    initViewController(root);
-                                    break;
-                                }
-                            }
-                        });
-                    }];
-                } else {
-                    // 如果没有 presentingViewController，直接初始化
-                    Class mainVCClass = objc_getClass("ViewController");
-                    for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                        UIViewController *root = window.rootViewController;
-                        if ([root isKindOfClass:mainVCClass]) {
-                            initViewController(root);
-                            break;
-                        }
-                    }
+                    [vc dismissViewControllerAnimated:NO completion:nil];
+                    LOG(@"✅ dismiss 验证页");
                 }
             }
         } @catch (NSException *e) {}
@@ -355,17 +250,39 @@ static void hookViewController(Class cls) {
     
     Method m;
     
+    // ⭐ v10 核心：在 viewDidLoad 执行前预设 state=1
     m = class_getInstanceMethod(cls, @selector(viewDidLoad));
     if (m) {
         IMP orig = method_getImplementation(m);
         const char *typeEnc = method_getTypeEncoding(m);
         IMP newIMP = imp_implementationWithBlock(^(id self) {
-            LOG(@"🎯 [MainVC] viewDidLoad");
+            LOG(@"🎯 [MainVC] viewDidLoad (预注入)");
+            // 关键：先设置 state=1，让原生 viewDidLoad 看到验证成功状态
+            @try {
+                [self setValue:@(1) forKey:@"state"];
+                LOG(@"✅ state 预设为 1");
+            } @catch (NSException *e) {
+                LOG(@"❌ 预设 state 失败: %@", e.reason);
+            }
+            // 再调用原生 viewDidLoad（此时 state=1，原生会创建 tableView/langSeg）
             ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
             snapshotProperties(self, @"MainVC(viewDidLoad)");
         });
         class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
-        LOG(@"  ✅ viewDidLoad");
+        LOG(@"  ✅ viewDidLoad (预注入 state=1)");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(viewWillAppear:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, BOOL animated) {
+            LOG(@"🎯 [MainVC] viewWillAppear:");
+            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewWillAppear:), animated);
+            snapshotProperties(self, @"MainVC(viewWillAppear)");
+        });
+        class_replaceMethod(cls, @selector(viewWillAppear:), newIMP, typeEnc);
+        LOG(@"  ✅ viewWillAppear:");
     }
     
     m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
@@ -376,15 +293,6 @@ static void hookViewController(Class cls) {
             LOG(@"🎯 [MainVC] viewDidAppear:");
             ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
             snapshotProperties(self, @"MainVC(viewDidAppear)");
-            
-            // 如果 state 还是 0，尝试自动初始化（备用机制）
-            @try {
-                id stateVal = [self valueForKey:@"state"];
-                if (stateVal && [stateVal integerValue] == 0) {
-                    LOG(@"⚠️ MainVC state=0，触发自动初始化");
-                    initViewController(self);
-                }
-            } @catch (NSException *e) {}
         });
         class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
         LOG(@"  ✅ viewDidAppear:");
@@ -394,7 +302,7 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV9] v9 手动初始化版已加载");
+    NSLog(@"[KFunV10] v10 预注入版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -407,6 +315,6 @@ static void iphook_init() {
         if (mainVC) hookViewController(mainVC);
         
         LOG(@"🚀 初始化完成");
-        LOG(@"📋 操作：打开软件 → 点验证 → 等 3 秒 → 观察主页面 → 复制日志");
+        LOG(@"📋 操作：打开软件 → 点验证 → 观察主页面 → 复制日志");
     });
 }
