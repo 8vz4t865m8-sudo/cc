@@ -1,6 +1,7 @@
 //
-//  KFun 诊断 Tweak v5 —— 策略调整版
-//  核心：不hook onTapVerify，hook activateCode:completion: 并探测completion参数
+//  KFun 诊断 Tweak v6
+//  发现：activateCode:completion: 不存在，网络走 libcurl
+//  策略：onTapVerify 调用原始 → showError: 拦截强制成功 → 增强轮询找功能 VC
 //
 
 #import <UIKit/UIKit.h>
@@ -9,13 +10,12 @@
 
 static UITextView *g_tv = nil;
 static UIView *g_container = nil;
-static BOOL g_clicked = NO;
 
 static void L(NSString *fmt, ...) {
     va_list a; va_start(a, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:a];
     va_end(a);
-    NSLog(@"[K5] %@", s);
+    NSLog(@"[K6] %@", s);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_tv) {
             NSString *t = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970];
@@ -62,19 +62,19 @@ static void setupWin() {
         }
         if (!kw) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ setupWin(); }); return; }
 
-        CGFloat w=340, h=340;
+        CGFloat w=340, h=360;
         g_container = [[UIView alloc] initWithFrame:CGRectMake(10,120,w,h)];
-        g_container.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.92];
+        g_container.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.95];
         g_container.layer.cornerRadius = 10;
         g_container.layer.borderColor = [UIColor greenColor].CGColor;
         g_container.layer.borderWidth = 1.5;
 
         UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0,0,w,30)];
-        bar.backgroundColor = [UIColor colorWithWhite:0.15 alpha:0.95];
+        bar.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.98];
         [g_container addSubview:bar];
 
         UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(8,4,w-70,22)];
-        tl.text = @"🔍 KFun诊断v5(拖动/点展开)";
+        tl.text = @"🔍 KFun诊断v6(拖动/点展开)";
         tl.textColor = [UIColor greenColor];
         tl.font = [UIFont boldSystemFontOfSize:11];
         [bar addSubview:tl];
@@ -93,7 +93,7 @@ static void setupWin() {
         g_tv.font = [UIFont fontWithName:@"Menlo" size:9];
         g_tv.backgroundColor = [UIColor clearColor];
         g_tv.editable = NO; g_tv.selectable = YES;
-        g_tv.text = @"[系统] KFun诊断v5已启动\n💡 请手动点击验证按钮！\n💡 观察completion探测结果\n";
+        g_tv.text = @"[系统] KFun诊断v6已启动\n💡 发现：activateCode:completion: 不存在\n💡 网络走 libcurl，无法拦截回调\n💡 策略：showError: 拦截强制成功\n";
         [g_container addSubview:g_tv];
 
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_lh action:@selector(pan:)];
@@ -149,93 +149,101 @@ static void hook_send(id self, SEL _cmd, SEL action, id target, UIEvent *event) 
         L(@"🖱️ BTN %@ -> %@.%@", NSStringFromClass([self class]), tgt, act);
         NSString *tt = [((UIButton*)self) titleForState:UIControlStateNormal];
         if (tt.length) L(@"   title=\"%@\"", tt);
-        if ([act isEqualToString:@"onTapVerify"]) g_clicked = YES;
     }
     orig_send(self, _cmd, action, target, event);
 }
 
-static void liteBypass(id target) {
-    L(@"🚀 LiteBypass...");
+static void forceSuccess(id target) {
+    L(@"🚀 强制成功逻辑...");
     @try {
         if ([target isKindOfClass:[UIViewController class]]) {
             for (UIView *v in ((UIViewController*)target).view.subviews) {
-                if ([v isKindOfClass:[UIActivityIndicatorView class]]) { [(UIActivityIndicatorView*)v stopAnimating]; v.hidden = YES; }
+                if ([v isKindOfClass:[UIActivityIndicatorView class]]) {
+                    [(UIActivityIndicatorView*)v stopAnimating];
+                    v.hidden = YES;
+                }
             }
         }
     } @catch (NSException *e) {}
     L(@"✅ 转圈已停止");
     @try {
         id mask = [target valueForKey:@"authMaskView"];
-        if (mask && [mask isKindOfClass:[UIView class]]) { [(UIView*)mask setHidden:YES]; [(UIView*)mask removeFromSuperview]; L(@"✅ mask已移除"); }
+        if (mask && [mask isKindOfClass:[UIView class]]) {
+            [(UIView*)mask setHidden:YES];
+            [(UIView*)mask removeFromSuperview];
+            L(@"✅ mask已移除");
+        }
     } @catch (NSException *e) {}
-}
-
-static void tryCB(id completion) {
-    if (!completion) { L(@"⚠️ completion=nil"); return; }
-    L(@"🔬 探测completion参数格式...");
-    NSDictionary *fd = @{@"status":@1, @"code":@200, @"msg":@"success", @"expire":@"2099-12-31", @"host":@"127.0.0.1:8080", @"values":@[@"突破沙盒",@"读取内存"], @"token":@"fake"};
-    NSString *fs = @"{\"status\":1,\"expire\":\"2099-12-31\"}";
-
-    @try { void(^cb)(NSDictionary*,NSError*) = completion; cb(fd, nil); L(@"✅ 2参数 (NSDictionary*,NSError*)"); return; } @catch (NSException *e) { L(@"❌ 2参数Dict: %@", e.reason); }
-    @try { void(^cb)(BOOL,NSString*) = completion; cb(YES, @"success"); L(@"✅ 2参数 (BOOL,NSString*)"); return; } @catch (NSException *e) { L(@"❌ 2参数Bool: %@", e.reason); }
-    @try { void(^cb)(NSDictionary*) = completion; cb(fd); L(@"✅ 1参数 NSDictionary*"); return; } @catch (NSException *e) { L(@"❌ 1参数Dict: %@", e.reason); }
-    @try { void(^cb)(NSString*) = completion; cb(fs); L(@"✅ 1参数 NSString*"); return; } @catch (NSException *e) { L(@"❌ 1参数Str: %@", e.reason); }
-    @try { void(^cb)(BOOL) = completion; cb(YES); L(@"✅ 1参数 BOOL"); return; } @catch (NSException *e) { L(@"❌ 1参数Bool: %@", e.reason); }
-    @try { void(^cb)(NSNumber*) = completion; cb(@1); L(@"✅ 1参数 NSNumber*"); return; } @catch (NSException *e) { L(@"❌ 1参数Num: %@", e.reason); }
-    @try { void(^cb)(id) = completion; cb(fd); L(@"✅ 1参数 id"); return; } @catch (NSException *e) { L(@"❌ 1参数id: %@", e.reason); }
-    @try { void(^cb)(void) = completion; cb(); L(@"✅ 无参数"); return; } @catch (NSException *e) { L(@"❌ 无参数: %@", e.reason); }
-    L(@"❌ 所有格式均失败");
+    @try {
+        if ([target respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+            [target performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"2099-12-31 23:59:59"];
+            L(@"✅ buildSuccessViewWithExpire: 已调用");
+        } else { L(@"⚠️ 无 buildSuccessViewWithExpire:"); }
+    } @catch (NSException *e) { L(@"❌ buildSuccess: %@", e.reason); }
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        [ud setObject:@"fake_token_12345" forKey:@"token"];
+        [ud setObject:@"2099-12-31" forKey:@"expire"];
+        [ud setObject:@"1" forKey:@"status"];
+        [ud setObject:@"activated" forKey:@"activation"];
+        [ud setObject:@"success" forKey:@"auth"];
+        [ud setObject:@"1" forKey:@"license"];
+        [ud synchronize];
+        L(@"✅ NSUserDefaults 伪造完成");
+    } @catch (NSException *e) { L(@"❌ UD伪造: %@", e.reason); }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            if ([target isKindOfClass:[UIViewController class]]) {
+                UIViewController *vc = (UIViewController*)target;
+                if (vc.presentingViewController) {
+                    [vc dismissViewControllerAnimated:NO completion:nil];
+                    L(@"✅ dismiss 验证弹窗");
+                } else { L(@"⚠️ 无 presentingViewController"); }
+            }
+        } @catch (NSException *e) { L(@"❌ dismiss: %@", e.reason); }
+    });
 }
 
 static void hookActClass(Class cls) {
     if (!cls) return;
     L(@"🎣 Hook类: %s", class_getName(cls));
     Method m;
-
     m = class_getInstanceMethod(cls, @selector(viewDidLoad));
     if (m) {
         method_setImplementation(m, imp_implementationWithBlock(^(id self) {
             L(@"🎯 viewDidLoad");
             struct objc_super s = {self, class_getSuperclass(object_getClass(self))};
             ((void (*)(struct objc_super*,SEL))objc_msgSendSuper)(&s, @selector(viewDidLoad));
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (!g_clicked) {
-                    UIViewController *t = topVC();
-                    if ([t isKindOfClass:[objc_getClass("WWWActivationViewController") class]]) { L(@"⏰ 8秒超时，LiteBypass"); liteBypass(t); }
-                    else { L(@"⏰ 8秒超时，验证界面已关闭"); }
-                } else { L(@"⏰ 8秒超时，用户已点击，跳过"); }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIViewController *top = topVC();
+                if ([top isKindOfClass:[objc_getClass("WWWActivationViewController") class]]) {
+                    L(@"⏰ 10秒超时，自动强制成功");
+                    forceSuccess(top);
+                }
             });
         }));
-        L(@"  ✅ viewDidLoad(8秒延迟)");
+        L(@"  ✅ viewDidLoad(10秒保底)");
     }
-
-    // 不hook onTapVerify！
-    L(@"  ⏭️ onTapVerify未hook");
-
-    m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
+    m = class_getInstanceMethod(cls, @selector(onTapVerify));
     if (m) {
-        method_setImplementation(m, imp_implementationWithBlock(^(id self, NSString *code, id completion) {
-            g_clicked = YES;
-            L(@"🎯 [ACTIVATE] code=\"%@\"", code);
-            L(@"   completion=%@ class=%@", D(completion), NSStringFromClass([completion class]));
-            L(@"   🚫 跳过网络请求");
-            tryCB(completion);
-            liteBypass(self);
+        method_setImplementation(m, imp_implementationWithBlock(^(id self) {
+            L(@"🎯 onTapVerify 被点击，调用原始实现发请求...");
+            struct objc_super s = {self, class_getSuperclass(object_getClass(self))};
+            ((void (*)(struct objc_super*,SEL))objc_msgSendSuper)(&s, @selector(onTapVerify));
+            L(@"🎯 onTapVerify 原始实现已返回");
         }));
-        L(@"  ✅ activateCode:completion:");
-    } else { L(@"  ⚠️ 无activateCode:"); }
-
+        L(@"  ✅ onTapVerify(调用原始)");
+    }
     m = class_getInstanceMethod(cls, @selector(showError:));
     if (m) {
         method_setImplementation(m, imp_implementationWithBlock(^(id self, NSString *msg) {
-            L(@"🛡️ showError: %@", msg); liteBypass(self);
+            L(@"🛡️ showError: %@ → 强制成功", msg);
+            forceSuccess(self);
         }));
-        L(@"  ✅ showError:");
+        L(@"  ✅ showError:(强制成功)");
     }
-
     m = class_getInstanceMethod(cls, @selector(isActivated));
     if (m) { method_setImplementation(m, imp_implementationWithBlock(^(id self){ return YES; })); L(@"  ✅ isActivated->YES"); }
-
     m = class_getInstanceMethod(cls, @selector(isVerified));
     if (m) { method_setImplementation(m, imp_implementationWithBlock(^(id self){ return YES; })); L(@"  ✅ isVerified->YES"); }
 }
@@ -247,22 +255,61 @@ static void scan() {
     if (c) hookActClass(c); else L(@"❌ 未找到验证类");
 }
 
+static void dumpVC(UIViewController *vc, int depth) {
+    if (!vc) return;
+    NSString *indent = [@"" stringByPaddingToLength:depth*2 withString:@"  " startingAtIndex:0];
+    L(@"%@📂 %@", indent, NSStringFromClass([vc class]));
+    unsigned int n=0;
+    Ivar *iv = class_copyIvarList([vc class], &n);
+    for (unsigned int i=0; i<n; i++) {
+        NSString *name = [NSString stringWithUTF8String:ivar_getName(iv[i])];
+        if ([name hasPrefix:@"_"]) {
+            @try { id v = object_getIvar(vc, iv[i]); if (v) L(@"%@  🔒 %@ = %@", indent, name, D(v)); } @catch (NSException *e) {}
+        }
+    }
+    free(iv);
+    if (vc.view) {
+        for (UIView *v in vc.view.subviews) {
+            if ([v isKindOfClass:[UIButton class]]) {
+                UIButton *btn = (UIButton*)v;
+                NSString *tt = [btn titleForState:UIControlStateNormal];
+                L(@"%@  🔘 Button: title=\"%@\" frame=%@ hidden=%d alpha=%.2f", indent, tt?tt:@"(无)", NSStringFromCGRect(btn.frame), (int)btn.hidden, btn.alpha);
+            }
+        }
+    }
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController*)vc;
+        for (NSInteger i=0; i<nav.viewControllers.count; i++) dumpVC(nav.viewControllers[i], depth+1);
+    }
+    if ([vc isKindOfClass:[UITabBarController class]]) {
+        UITabBarController *tbc = (UITabBarController*)vc;
+        for (NSInteger i=0; i<tbc.viewControllers.count; i++) {
+            L(@"%@  📁 Tab[%ld]:", indent, (long)i);
+            dumpVC(tbc.viewControllers[i], depth+2);
+        }
+    }
+}
+
 static void poll() {
     [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *t) {
         @try {
             UIViewController *vc = topVC();
             if (!vc) { L(@"⚠️ 无VC"); return; }
-            L(@"📍 当前: %@", NSStringFromClass([vc class]));
-            for (NSString *k in @[@"authMaskView",@"codeField",@"verifyButton",@"errorLabel",@"successView",@"spinner",@"tableView",@"values",@"host",@"dataText"]) {
-                id v = nil; @try { v = [vc valueForKey:k]; } @catch (NSException *e) {}
-                if (v) L(@"  📌 %@: %@", k, D(v));
+            L(@"📍 当前顶层: %@", NSStringFromClass([vc class]));
+            if ([vc isKindOfClass:[UITabBarController class]]) {
+                L(@"📍 UITabBarController 详细结构:");
+                dumpVC(vc, 1);
+            } else if ([vc isKindOfClass:[objc_getClass("WWWActivationViewController") class]]) {
+                for (NSString *k in @[@"authMaskView",@"codeField",@"verifyButton",@"errorLabel",@"successView",@"spinner",@"tableView",@"values",@"host",@"dataText"]) {
+                    id v = nil; @try { v = [vc valueForKey:k]; } @catch (NSException *e) {}
+                    if (v) L(@"  📌 %@: %@", k, D(v));
+                }
             }
         } @catch (NSException *e) { L(@"❌ poll: %@", e.reason); }
     }];
-    L(@"🔄 轮询已启动");
+    L(@"🔄 轮询已启动(每5秒)");
 }
 
-// 诊断hooks
 static void (*o_vdl)(id,SEL);
 static void d_vdl(id self, SEL _cmd) { L(@"📱 [VC] vdl %@", NSStringFromClass([self class])); o_vdl(self,_cmd); }
 static void (*o_push)(id,SEL,id,BOOL);
@@ -321,7 +368,7 @@ static void installDiag() {
 __attribute__((constructor))
 static void init() {
     NSLog(@"========================================");
-    NSLog(@"[K5] KFun诊断v5已加载");
+    NSLog(@"[K6] KFun诊断v6已加载");
     NSLog(@"========================================");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupWin();
@@ -332,6 +379,6 @@ static void init() {
         poll();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ installDiag(); });
         L(@"🚀 初始化完成");
-        L(@"💡 请手动点击验证按钮！");
+        L(@"💡 输入任意卡密 → 点验证 → showError:会被拦截强制成功");
     });
 }
