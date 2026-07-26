@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun 真卡密记录版
-//  目标：记录正常验证流程的完整调用链，不干扰正常流程
+//  iphook.m - KFun 真卡密记录版 v2-fix
+//  修复：删除 method_setImplementation，只保留 class_replaceMethod 安全 hook
 //
 
 #import <UIKit/UIKit.h>
@@ -155,38 +155,12 @@ static void recordNetwork() {
 }
 
 // ============================================================
-// 通用方法拦截（只记录，不打断）
-// ============================================================
-static void hookAndLogAllMethods(Class cls, NSString *label) {
-    if (!cls) return;
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    for (unsigned int i = 0; i < count; i++) {
-        SEL sel = method_getName(methods[i]);
-        NSString *selName = NSStringFromSelector(sel);
-        // 跳过系统高频方法
-        if ([selName hasPrefix:@"_"] || [selName isEqualToString:@"dealloc"] ||
-            [selName isEqualToString:@"description"] || [selName isEqualToString:@"debugDescription"] ||
-            [selName isEqualToString:@"hash"] || [selName isEqualToString:@"isEqual:"]) continue;
-        
-        IMP origIMP = method_getImplementation(methods[i]);
-        method_setImplementation(methods[i], imp_implementationWithBlock(^(id self, ...) {
-            LOG(@"🎣 [%@] %@ 被调用", label, selName);
-            return ((id (*)(id, SEL))origIMP)(self, sel);
-        }));
-    }
-    if (methods) free(methods);
-    LOG(@"✅ %@ 已记录 %u 个方法", label, count);
-}
-
-// ============================================================
 // 监控 onVerify 和 state 变化
 // ============================================================
 static __weak id g_actVC = nil;
 
 static void startMonitoring() {
     [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
-        // 监控 ActVC 的 onVerify
         if (g_actVC) {
             @try {
                 static id lastOnVerify = nil;
@@ -195,10 +169,6 @@ static void startMonitoring() {
                     LOG(@"🔔 [ActVC] onVerify 变化: %@ -> %@", lastOnVerify?@"非nil":@"nil", current?@"非nil":@"nil");
                     if (!current && lastOnVerify) {
                         LOG(@"🎉 onVerify 被调用并置为 nil！");
-                        LOG(@"   调用栈:");
-                        for (NSString *line in [NSThread callStackSymbols]) {
-                            LOG(@"   📞 %@", line);
-                        }
                         snapshotProperties(g_actVC, @"ActVC(onVerify调用后)");
                     }
                     lastOnVerify = current;
@@ -207,7 +177,6 @@ static void startMonitoring() {
         }
     }];
     
-    // 监控 MainVC 的 state
     [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
         Class mainVCClass = objc_getClass("ViewController");
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
@@ -230,7 +199,7 @@ static void startMonitoring() {
 }
 
 // ============================================================
-// Hook 入口（只记录，不拦截）
+// Hook 入口（只记录关键方法，不 hook 全部）
 // ============================================================
 static void hookActivationVC(Class cls) {
     if (!cls) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
@@ -238,7 +207,6 @@ static void hookActivationVC(Class cls) {
     
     Method m;
     
-    // viewDidLoad：记录属性，保存弱引用
     m = class_getInstanceMethod(cls, @selector(viewDidLoad));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -253,7 +221,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ viewDidLoad");
     }
     
-    // onTapVerify：记录但不拦截
     m = class_getInstanceMethod(cls, @selector(onTapVerify));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -269,7 +236,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ onTapVerify");
     }
     
-    // showError:：记录
     m = class_getInstanceMethod(cls, @selector(showError:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -283,7 +249,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ showError:");
     }
     
-    // showSuccess:completion:：记录
     m = class_getInstanceMethod(cls, @selector(showSuccess:completion:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -301,7 +266,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ showSuccess:completion:");
     }
     
-    // buildSuccessViewWithExpire:：记录
     m = class_getInstanceMethod(cls, @selector(buildSuccessViewWithExpire:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -314,7 +278,6 @@ static void hookActivationVC(Class cls) {
         LOG(@"  ✅ buildSuccessViewWithExpire:");
     }
     
-    // setupAfterActivation：记录
     m = class_getInstanceMethod(cls, @selector(setupAfterActivation));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -326,9 +289,6 @@ static void hookActivationVC(Class cls) {
         class_replaceMethod(cls, @selector(setupAfterActivation), newIMP, typeEnc);
         LOG(@"  ✅ setupAfterActivation");
     }
-    
-    // 记录所有其他方法
-    hookAndLogAllMethods(cls, @"ActVC");
 }
 
 static void hookViewController(Class cls) {
@@ -375,15 +335,12 @@ static void hookViewController(Class cls) {
         class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
         LOG(@"  ✅ viewDidAppear:");
     }
-    
-    // 记录所有其他方法
-    hookAndLogAllMethods(cls, @"MainVC");
 }
 
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunRec] 真卡密记录版已加载");
+    NSLog(@"[KFunRec] 真卡密记录版 v2-fix 已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -400,6 +357,5 @@ static void iphook_init() {
         
         LOG(@"🚀 记录系统已启动");
         LOG(@"📋 操作：输入真卡密 → 点验证 → 等进入主页面 → 点复制发给我");
-        LOG(@"⚠️ 注意：此版本不 bypass，正常走验证流程");
     });
 }
