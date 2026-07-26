@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass 修复版 v6
-//  核心：探测 onVerify block 签名，安全调用，避免闪退
+//  iphook.m - KFun Bypass 修复版 v6-fix
+//  修复：ARC 桥接转换 (__bridge)
 //
 
 #import <UIKit/UIKit.h>
@@ -109,7 +109,7 @@ static void setupLogWindow() {
 }
 
 // ============================================================
-// ⭐ Block 签名探测（核心修复）
+// ⭐ Block 签名探测
 // ============================================================
 struct Block_descriptor_v1 {
     unsigned long int reserved;
@@ -130,7 +130,7 @@ struct Block_literal {
 
 static const char *getBlockSignature(id blockObj) {
     if (!blockObj) return NULL;
-    struct Block_literal *block = (struct Block_literal *)blockObj;
+    struct Block_literal *block = (__bridge struct Block_literal *)blockObj;
     if (!(block->flags & BLOCK_HAS_SIGNATURE)) return NULL;
     return block->descriptor->signature;
 }
@@ -146,32 +146,25 @@ static void safeInvokeBlock(id blockObj) {
         return;
     }
     
-    // 解析签名，判断参数个数
-    // 签名格式示例: "v8@?0" (无参), "v16@?0@8" (1个对象参数), "v20@?0B8@12" (BOOL+对象)
-    // 简单判断：数 '@' 的个数（第一个是 block 自身 @?，后面是参数）
     int paramCount = 0;
     for (const char *p = sig; *p; p++) {
         if (*p == '@') paramCount++;
     }
-    // 第一个 @ 是 block 自己，所以实际参数 = paramCount - 1
     int actualParams = paramCount - 1;
     LOG(@"⭐ Block 参数个数估算: %d", actualParams);
     
     @try {
         if (actualParams <= 0) {
-            // 无参
             typedef void (^VoidBlock)(void);
             VoidBlock blk = (VoidBlock)blockObj;
             blk();
             LOG(@"✅ 无参 block 调用成功");
         } else if (actualParams == 1) {
-            // 1个参数，猜测是 NSString
             typedef void (^OneParamBlock)(id);
             OneParamBlock blk = (OneParamBlock)blockObj;
             blk(@"2099-12-31 23:59:59");
             LOG(@"✅ 1参 block 调用成功 (传 NSString)");
         } else if (actualParams == 2) {
-            // 2个参数，猜测是 BOOL + NSString
             typedef void (^TwoParamBlock)(BOOL, id);
             TwoParamBlock blk = (TwoParamBlock)blockObj;
             blk(YES, @"2099-12-31 23:59:59");
@@ -242,7 +235,6 @@ static void doBypass(id vcInstance) {
         }
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
-    // ⭐ 关键：安全调用 onVerify block
     @try {
         id onVerify = [vcInstance valueForKey:@"onVerify"];
         if (onVerify) {
@@ -255,7 +247,6 @@ static void doBypass(id vcInstance) {
         LOG(@"❌ 读取/调用 onVerify 失败: %@", e.reason);
     }
     
-    // 延迟 dismiss
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if ([vcInstance isKindOfClass:[UIViewController class]]) {
@@ -267,7 +258,6 @@ static void doBypass(id vcInstance) {
             }
         } @catch (NSException *e) {}
         
-        // dismiss 后检查主页面
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             Class mainVCClass = objc_getClass("ViewController");
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
@@ -383,7 +373,7 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV6] v6 Block探测版已加载");
+    NSLog(@"[KFunV6] v6-fix 已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
