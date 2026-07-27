@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass v14 (state修复版)
-//  基于 v13，增加 MainVC.state 设置和数据加载触发
+//  iphook.m - KFun Bypass v15
+//  修复：NSInteger 类型 state 的正确写入方式
 //
 
 #import <UIKit/UIKit.h>
@@ -15,7 +15,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV14] %@", line);
+    NSLog(@"[KFunV15] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 15000) {
@@ -78,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v14 state修复 (拖动)";
+        title.text = @"🔍 KFun v15 NSInteger修复 (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -104,7 +104,7 @@ static void setupLogWindow() {
         [titleBar addGestureRecognizer:pan];
         
         [keyWindow addSubview:g_logContainer];
-        LOG(@"✅ 悬浮窗已启动 v14");
+        LOG(@"✅ 悬浮窗已启动 v15");
     });
 }
 
@@ -129,10 +129,11 @@ static void snapshotProperties(id obj, NSString *label) {
 }
 
 // ============================================================
-// 🚀 Bypass 核心 - v14 修复版
+// 🚀 Bypass 核心 - v15 修复版
+// 核心修复：NSInteger 类型 state 的正确写入
 // ============================================================
 static void doBypass(id vcInstance) {
-    LOG(@"🚀 Bypass v14 开始");
+    LOG(@"🚀 Bypass v15 开始");
     
     // 1. 停止 spinner
     @try {
@@ -194,73 +195,106 @@ static void doBypass(id vcInstance) {
     } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
     
     // ============================================================
-    // ⭐ v14 核心修复：设置 MainVC.state 触发数据加载
+    // ⭐ v15 核心修复：正确设置 MainVC.state (NSInteger)
     // ============================================================
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        LOG(@"⭐ 开始修复 MainVC state...");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LOG(@"⭐ 开始修复 MainVC state (NSInteger)...");
         
         Class mainVCClass = objc_getClass("ViewController");
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
             UIViewController *root = window.rootViewController;
-            if ([root isKindOfClass:mainVCClass]) {
-                LOG(@"🎯 找到 MainVC");
-                snapshotProperties(root, @"MainVC(修复前)");
-                
-                // 尝试设置 state = 1（最常见的"已验证"状态值）
-                @try {
-                    if ([root respondsToSelector:@selector(setState:)]) {
-                        [root performSelector:@selector(setState:) withObject:@(1)];
-                        LOG(@"✅ setState:1 已调用");
+            if (![root isKindOfClass:mainVCClass]) continue;
+            
+            LOG(@"🎯 找到 MainVC: %@", root);
+            snapshotProperties(root, @"MainVC(修复前)");
+            
+            // 方法1：NSInvocation 正确调用 setState: (NSInteger 参数)
+            @try {
+                if ([root respondsToSelector:@selector(setState:)]) {
+                    NSMethodSignature *sig = [root methodSignatureForSelector:@selector(setState:)];
+                    if (sig) {
+                        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                        [inv setTarget:root];
+                        [inv setSelector:@selector(setState:)];
+                        NSInteger newState = 1;
+                        [inv setArgument:&newState atIndex:2];
+                        [inv invoke];
+                        LOG(@"✅ NSInvocation setState:%ld 已调用", (long)newState);
                     }
-                    // 也尝试直接设置 _state ivar
-                    Ivar stateIvar = class_getInstanceVariable([root class], "_state");
-                    if (stateIvar) {
-                        object_setIvar(root, stateIvar, @(1));
-                        LOG(@"✅ _state = 1 (直接设置ivar)");
-                    }
-                } @catch (NSException *e) {
-                    LOG(@"❌ setState:1 失败: %@", e.reason);
                 }
-                
-                // 尝试设置 statusText
+            } @catch (NSException *e) {
+                LOG(@"❌ NSInvocation setState: 失败: %@", e.reason);
+            }
+            
+            // 方法2：objc_msgSend 直接发送 (双重保险)
+            @try {
+                if ([root respondsToSelector:@selector(setState:)]) {
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(root, @selector(setState:), 1);
+                    LOG(@"✅ objc_msgSend setState:1 已调用");
+                }
+            } @catch (NSException *e) {
+                LOG(@"❌ objc_msgSend setState: 失败: %@", e.reason);
+            }
+            
+            // 方法3：直接写 _state ivar 内存 (最终保险)
+            @try {
+                Ivar stateIvar = class_getInstanceVariable([root class], "_state");
+                if (stateIvar) {
+                    ptrdiff_t offset = ivar_getOffset(stateIvar);
+                    void *objPtr = (__bridge void *)root;
+                    NSInteger *statePtr = (NSInteger *)((char *)objPtr + offset);
+                    *statePtr = 1;
+                    LOG(@"✅ _state ivar 直接写入 = 1 (offset=%td, ptr=%p)", offset, statePtr);
+                } else {
+                    LOG(@"⚠️ 未找到 _state ivar");
+                }
+            } @catch (NSException *e) {
+                LOG(@"❌ _state ivar 写入失败: %@", e.reason);
+            }
+            
+            // 设置 statusText
+            @try {
+                if ([root respondsToSelector:@selector(setStatusText:)]) {
+                    [root performSelector:@selector(setStatusText:) withObject:@"已激活"];
+                    LOG(@"✅ setStatusText: 已调用");
+                }
+            } @catch (NSException *e) {}
+            
+            // 设置 dataText
+            @try {
+                if ([root respondsToSelector:@selector(setDataText:)]) {
+                    [root performSelector:@selector(setDataText:) withObject:@"连接成功"];
+                    LOG(@"✅ setDataText: 已调用");
+                }
+            } @catch (NSException *e) {}
+            
+            // 延迟后再次触发 viewDidAppear:，让 MainVC 重新检查 state 并加载数据
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 @try {
-                    if ([root respondsToSelector:@selector(setStatusText:)]) {
-                        [root performSelector:@selector(setStatusText:) withObject:@"已激活"];
-                        LOG(@"✅ setStatusText: 已调用");
-                    }
-                } @catch (NSException *e) {}
-                
-                // 尝试调用 viewDidLoad 重新加载（如果它内部有根据 state 加载数据的逻辑）
-                @try {
-                    if ([root respondsToSelector:@selector(viewDidLoad)]) {
-                        // 不要直接调 viewDidLoad，尝试找可能的数据加载方法
-                        // 常见命名：loadData、refreshData、reloadData、fetchData、updateData
-                        NSArray *possibleMethods = @[
-                            @"loadData", @"refreshData", @"reloadData", @"fetchData", @"updateData",
-                            @"loadConfig", @"refreshConfig", @"fetchConfig", @"updateConfig",
-                            @"startRadar", @"startLoading", @"initialize", @"setupUI",
-                            @"loadContent", @"refreshContent", @"updateUI", @"renderUI"
-                        ];
-                        for (NSString *methodName in possibleMethods) {
-                            SEL sel = NSSelectorFromString(methodName);
-                            if ([root respondsToSelector:sel]) {
-                                [root performSelector:sel];
-                                LOG(@"✅ 调用 %@ 成功", methodName);
-                                break;
-                            }
+                    if ([root respondsToSelector:@selector(viewDidAppear:)]) {
+                        // 使用 NSInvocation 调用，避免 performSelector 参数类型问题
+                        NSMethodSignature *sig = [root methodSignatureForSelector:@selector(viewDidAppear:)];
+                        if (sig) {
+                            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                            [inv setTarget:root];
+                            [inv setSelector:@selector(viewDidAppear:)];
+                            BOOL anim = NO;
+                            [inv setArgument:&anim atIndex:2];
+                            [inv invoke];
+                            LOG(@"✅ 重新触发 viewDidAppear:");
                         }
                     }
                 } @catch (NSException *e) {
-                    LOG(@"❌ 数据加载方法调用失败: %@", e.reason);
+                    LOG(@"❌ viewDidAppear: 触发失败: %@", e.reason);
                 }
                 
-                // 延迟后快照
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    snapshotProperties(root, @"MainVC(修复后)");
+                // 最终快照
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    snapshotProperties(root, @"MainVC(最终)");
                 });
-                
-                break;
-            }
+            });
+            
+            break; // 只处理第一个匹配的
         }
     });
     
@@ -367,7 +401,7 @@ static void hookViewController(Class cls) {
         IMP orig = method_getImplementation(m);
         const char *typeEnc = method_getTypeEncoding(m);
         IMP newIMP = imp_implementationWithBlock(^(id self, BOOL animated) {
-            LOG(@"🎯 [MainVC] viewDidAppear:");
+            LOG(@"🎯 [MainVC] viewDidAppear: (state=%@)", [self valueForKey:@"state"]);
             ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
             snapshotProperties(self, @"MainVC(viewDidAppear)");
         });
@@ -375,7 +409,7 @@ static void hookViewController(Class cls) {
         LOG(@"  ✅ viewDidAppear:");
     }
     
-    // ⭐ v14 新增：监听 setState: 变化
+    // 监听 setState: 变化
     m = class_getInstanceMethod(cls, @selector(setState:));
     if (m) {
         IMP orig = method_getImplementation(m);
@@ -393,7 +427,7 @@ static void hookViewController(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV14] v14 state修复版已加载");
+    NSLog(@"[KFunV15] v15 NSInteger修复版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -405,8 +439,7 @@ static void iphook_init() {
         Class mainVC = objc_getClass("ViewController");
         if (mainVC) hookViewController(mainVC);
         
-        LOG(@"🚀 初始化完成 v14");
+        LOG(@"🚀 初始化完成 v15");
         LOG(@"📋 操作：打开软件 → 点验证 → 观察主页面是否加载内容");
-        LOG(@"📋 如果仍空白，复制日志发给我，我会调整 state 值");
     });
 }
