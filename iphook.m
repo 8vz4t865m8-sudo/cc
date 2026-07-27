@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun 真卡密纯净记录版 v5
-//  原则：只读、只记、不改。所有参数/回调直接透传，绝不替换 block。
+//  iphook.m - KFun 增强记录版 v3
+//  重点：抓取 state 变化、setter 调用、NSNotification
 //
 
 #import <UIKit/UIKit.h>
@@ -14,12 +14,12 @@ static UIView *g_logContainer = nil;
 static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
-    NSString *line = [NSString stringWithFormat:@"[%.3f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunRec] %@", line);
+    NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
+    NSLog(@"[KFunRec3] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
-    if (g_logBuffer.length > 80000) {
-        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 80000)];
+    if (g_logBuffer.length > 30000) {
+        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 30000)];
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_logView) {
@@ -65,24 +65,24 @@ static void setupLogWindow() {
             #pragma clang diagnostic pop
         }
         if (!keyWindow) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupLogWindow(); }); return; }
-
-        CGFloat w = 350, h = 300;
-        g_logContainer = [[UIView alloc] initWithFrame:CGRectMake(8, 100, w, h)];
+        
+        CGFloat w = 350, h = 350;
+        g_logContainer = [[UIView alloc] initWithFrame:CGRectMake(8, 80, w, h)];
         g_logContainer.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.93];
         g_logContainer.layer.cornerRadius = 10;
         g_logContainer.layer.borderColor = [UIColor cyanColor].CGColor;
         g_logContainer.layer.borderWidth = 1.2;
-
+        
         UIView *titleBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 28)];
         titleBar.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
         [g_logContainer addSubview:titleBar];
-
+        
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun 真卡密记录 (拖动)";
+        title.text = @"🔍 KFun 增强记录 v3";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
-
+        
         UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
         copyBtn.frame = CGRectMake(w-70, 3, 65, 22);
         [copyBtn setTitle:@"📋复制" forState:UIControlStateNormal];
@@ -91,7 +91,7 @@ static void setupLogWindow() {
         g_dragHandler = [[LogDragHandler alloc] init];
         [copyBtn addTarget:g_dragHandler action:@selector(copyLog:) forControlEvents:UIControlEventTouchUpInside];
         [titleBar addSubview:copyBtn];
-
+        
         g_logView = [[UITextView alloc] initWithFrame:CGRectMake(2, 30, w-4, h-32)];
         g_logView.textColor = [UIColor greenColor];
         g_logView.font = [UIFont fontWithName:@"Menlo" size:8];
@@ -99,326 +99,321 @@ static void setupLogWindow() {
         g_logView.editable = NO;
         g_logView.selectable = YES;
         [g_logContainer addSubview:g_logView];
-
+        
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_dragHandler action:@selector(handlePan:)];
         [titleBar addGestureRecognizer:pan];
-
+        
         [keyWindow addSubview:g_logContainer];
         LOG(@"✅ 悬浮窗已启动");
     });
 }
 
-// ============================================================
-// 快照工具
-// ============================================================
-static void snapProps(id obj, NSString *label) {
+static void snapshotProperties(id obj, NSString *label) {
     if (!obj) return;
-    LOG(@"📸 [%@] props begin", label);
-    unsigned int c = 0;
-    objc_property_t *props = class_copyPropertyList(object_getClass(obj), &c);
-    for (unsigned int i = 0; i < c; i++) {
+    LOG(@"📸 [%@] begin", label);
+    unsigned int count = 0;
+    objc_property_t *props = class_copyPropertyList(object_getClass(obj), &count);
+    for (unsigned int i = 0; i < count; i++) {
         NSString *name = [NSString stringWithUTF8String:property_getName(props[i])];
         @try {
             id val = [obj valueForKey:name];
-            NSString *d = val ? [val description] : @"nil";
-            if (d.length > 100) d = [d substringToIndex:100];
-            LOG(@"   %@=%@", name, d);
-        } @catch (NSException *e) {}
+            NSString *desc = val ? [val description] : @"nil";
+            if (desc.length > 100) desc = [desc substringToIndex:100];
+            LOG(@"   %@ = %@", name, desc);
+        } @catch (NSException *e) {
+            LOG(@"   %@ = [err:%@]", name, e.reason);
+        }
     }
     if (props) free(props);
-    LOG(@"📸 [%@] props end", label);
-}
-
-static void snapIvars(id obj, NSString *label) {
-    if (!obj) return;
-    LOG(@"📦 [%@] ivars begin", label);
-    unsigned int c = 0;
-    Ivar *ivars = class_copyIvarList(object_getClass(obj), &c);
-    for (unsigned int i = 0; i < c; i++) {
-        NSString *name = [NSString stringWithUTF8String:ivar_getName(ivars[i])];
-        @try {
-            id val = object_getIvar(obj, ivars[i]);
-            NSString *d = val ? [val description] : @"nil";
-            if (d.length > 100) d = [d substringToIndex:100];
-            LOG(@"   %@=%@", name, d);
-        } @catch (NSException *e) {}
-    }
-    if (ivars) free(ivars);
-    LOG(@"📦 [%@] ivars end", label);
-}
-
-static void dumpViews(UIView *v, int depth) {
-    if (!v || depth > 5) return;
-    NSString *ind = [@"" stringByPaddingToLength:depth*2 withString:@"  " startingAtIndex:0];
-    LOG(@"%@%@%@ frame=%@ h=%d a=%.1f", ind, v.hidden?@"[H]":@"", NSStringFromClass([v class]), NSStringFromCGRect(v.frame), (int)v.hidden, v.alpha);
-    for (UIView *sub in v.subviews) dumpViews(sub, depth+1);
-}
-
-static void dumpWin(NSString *label) {
-    LOG(@"🪟 [%@] begin", label);
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    NSArray *wins = [UIApplication sharedApplication].windows;
-    #pragma clang diagnostic pop
-    for (UIWindow *w in wins) {
-        LOG(@"  Win %@ root=%@ hidden=%d", NSStringFromClass([w class]), NSStringFromClass([w.rootViewController class]), (int)w.hidden);
-        if (w.rootViewController) dumpViews(w.rootViewController.view, 1);
-    }
-    LOG(@"🪟 [%@] end", label);
+    LOG(@"📸 [%@] end", label);
 }
 
 // ============================================================
-// 🎣 安全 Hook 宏：入口记录，出口记录，中间绝对透传
+// 网络记录
 // ============================================================
-#define SAFE_HOOK_0(cls, selName, logPrefix) \
-do { \
-    Method m = class_getInstanceMethod(cls, @selector(selName)); \
-    if (m) { \
-        IMP orig = method_getImplementation(m); \
-        const char *te = method_getTypeEncoding(m); \
-        IMP imp = imp_implementationWithBlock(^(id self) { \
-            LOG(@"%@ " #selName " 入口", logPrefix); \
-            snapIvars(self, @"" #selName "_入口"); \
-            ((void (*)(id, SEL))orig)(self, @selector(selName)); \
-            LOG(@"%@ " #selName " 出口", logPrefix); \
-            snapIvars(self, @"" #selName "_出口"); \
-        }); \
-        class_replaceMethod(cls, @selector(selName), imp, te); \
-        LOG(@"  ✅ " #selName); \
-    } \
-} while(0)
-
-#define SAFE_HOOK_1(cls, selName, type1, logPrefix) \
-do { \
-    Method m = class_getInstanceMethod(cls, @selector(selName:)); \
-    if (m) { \
-        IMP orig = method_getImplementation(m); \
-        const char *te = method_getTypeEncoding(m); \
-        IMP imp = imp_implementationWithBlock(^(id self, type1 arg1) { \
-            LOG(@"%@ " #selName ":%@ 入口", logPrefix, arg1 ? [NSString stringWithFormat:@"%@", arg1] : @"nil"); \
-            snapIvars(self, @"" #selName "_入口"); \
-            ((void (*)(id, SEL, type1))orig)(self, @selector(selName:), arg1); \
-            LOG(@"%@ " #selName ": 出口", logPrefix); \
-            snapIvars(self, @"" #selName "_出口"); \
-        }); \
-        class_replaceMethod(cls, @selector(selName:), imp, te); \
-        LOG(@"  ✅ " #selName ":"); \
-    } \
-} while(0)
-
-#define SAFE_HOOK_2(cls, selName, type1, type2, logPrefix) \
-do { \
-    Method m = class_getInstanceMethod(cls, @selector(selName:selName:)); \
-    if (m) { \
-        IMP orig = method_getImplementation(m); \
-        const char *te = method_getTypeEncoding(m); \
-        IMP imp = imp_implementationWithBlock(^(id self, type1 arg1, type2 arg2) { \
-            NSString *a1 = arg1 ? [NSString stringWithFormat:@"%@", arg1] : @"nil"; \
-            NSString *a2 = arg2 ? [NSString stringWithFormat:@"%@", arg2] : @"nil"; \
-            if (a1.length > 80) a1 = [a1 substringToIndex:80]; \
-            if (a2.length > 80) a2 = [a2 substringToIndex:80]; \
-            LOG(@"%@ " #selName ":%@ %@ 入口", logPrefix, a1, a2); \
-            snapIvars(self, @"" #selName "_入口"); \
-            ((void (*)(id, SEL, type1, type2))orig)(self, @selector(selName:selName:), arg1, arg2); \
-            LOG(@"%@ " #selName ": 出口", logPrefix); \
-            snapIvars(self, @"" #selName "_出口"); \
-        }); \
-        class_replaceMethod(cls, @selector(selName:selName:), imp, te); \
-        LOG(@"  ✅ " #selName ":"); \
-    } \
-} while(0)
-
-// ============================================================
-// 🎣 网络记录（只记录 URL，不 wrap block）
-// ============================================================
-static void hookNetwork() {
+static void recordNetwork() {
     Class cls = [NSURLSession class];
-    Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-    if (m1) {
-        IMP orig = method_getImplementation(m1);
-        const char *te = method_getTypeEncoding(m1);
-        IMP imp = imp_implementationWithBlock(^(id self, NSURLRequest *req, id completion) {
-            NSString *body = nil;
-            if (req.HTTPBody && req.HTTPBody.length < 2000) {
-                body = [[NSString alloc] initWithData:req.HTTPBody encoding:NSUTF8StringEncoding];
+    Method m = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    const char *typeEnc = method_getTypeEncoding(m);
+    IMP newIMP = imp_implementationWithBlock(^(id self, NSURL *url, id completion) {
+        LOG(@"🌐 请求: %@", url.absoluteString);
+        id wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+            LOG(@"🌐 响应: %@ | %ld | %@", url.absoluteString, (long)(http?http.statusCode:0), error?error.localizedDescription:@"ok");
+            if (data && data.length < 3000) {
+                NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (body) LOG(@"🌐 Body: %@", body);
+            } else if (data) {
+                LOG(@"🌐 Body: [%lu bytes]", (unsigned long)data.length);
             }
-            LOG(@"🌐 REQ %@ %@ body=%@", req.HTTPMethod, req.URL.absoluteString, body ? body : @"nil");
-            // 直接透传 completion，绝不 wrap
-            id ret = ((id (*)(id, SEL, NSURLRequest*, id))orig)(self, @selector(dataTaskWithRequest:completionHandler:), req, completion);
-            return ret;
+            if (completion) ((void(^)(NSData*,NSURLResponse*,NSError*))completion)(data, response, error);
+        };
+        return ((id (*)(id, SEL, NSURL*, id))orig)(self, @selector(dataTaskWithURL:completionHandler:), url, wrapped);
+    });
+    class_replaceMethod(cls, @selector(dataTaskWithURL:completionHandler:), newIMP, typeEnc);
+    
+    // 也 hook dataTaskWithRequest
+    Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
+    if (m2) {
+        IMP orig2 = method_getImplementation(m2);
+        const char *typeEnc2 = method_getTypeEncoding(m2);
+        IMP newIMP2 = imp_implementationWithBlock(^(id self, NSURLRequest *req, id completion) {
+            LOG(@"🌐 请求[POST]: %@ | Body:%lu", req.URL.absoluteString, (unsigned long)(req.HTTPBody?req.HTTPBody.length:0));
+            if (req.HTTPBody && req.HTTPBody.length < 2000) {
+                NSString *body = [[NSString alloc] initWithData:req.HTTPBody encoding:NSUTF8StringEncoding];
+                if (body) LOG(@"🌐 POST Body: %@", body);
+            }
+            id wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
+                NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+                LOG(@"🌐 响应[POST]: %@ | %ld", req.URL.absoluteString, (long)(http?http.statusCode:0));
+                if (data && data.length < 3000) {
+                    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                    if (body) LOG(@"🌐 POST Resp: %@", body);
+                }
+                if (completion) ((void(^)(NSData*,NSURLResponse*,NSError*))completion)(data, response, error);
+            };
+            return ((id (*)(id, SEL, NSURLRequest*, id))orig2)(self, @selector(dataTaskWithRequest:completionHandler:), req, wrapped);
         });
-        class_replaceMethod(cls, @selector(dataTaskWithRequest:completionHandler:), imp, te);
-        LOG(@"✅ 网络已 Hook");
+        class_replaceMethod(cls, @selector(dataTaskWithRequest:completionHandler:), newIMP2, typeEnc2);
     }
+    LOG(@"✅ 网络记录已启用");
 }
 
 // ============================================================
-// 🎣 主 Hook
+// 万能 setter hook 工具
 // ============================================================
-static void hookAll() {
-    Class actCls = objc_getClass(@"WWWActivation");
-    Class actVC = objc_getClass(@"WWWActivationViewController");
-    Class mainVC = objc_getClass(@"ViewController");
-
-    if (actCls) {
-        LOG(@"🎣 Hook WWWActivation");
-        // activateCode:completion: —— 只记录，透传 completion
-        Method m = class_getInstanceMethod(actCls, @selector(activateCode:completion:));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            const char *te = method_getTypeEncoding(m);
-            IMP imp = imp_implementationWithBlock(^(id self, NSString *code, id completion) {
-                LOG(@"🎣 activateCode:%@ completion=%@", code, completion ? @"有" : @"nil");
-                snapIvars(self, @"WWWActivation_activateCode入口");
-                // 直接透传
-                id ret = ((id (*)(id, SEL, NSString*, id))orig)(self, @selector(activateCode:completion:), code, completion);
-                LOG(@"🎣 activateCode 已返回");
-                // 延迟快照
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    snapIvars(self, @"WWWActivation_activateCode+0.5s");
-                });
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    snapIvars(self, @"WWWActivation_activateCode+1.5s");
-                });
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    snapIvars(self, @"WWWActivation_activateCode+3.0s");
-                });
-                return ret;
-            });
-            class_replaceMethod(actCls, @selector(activateCode:completion:), imp, te);
-            LOG(@"  ✅ activateCode:completion:");
-        }
-
-        SAFE_HOOK_0(actCls, setupAfterActivation, @"🎣");
-
-        // activationStampPath —— 记录返回值
-        Method m2 = class_getInstanceMethod(actCls, @selector(activationStampPath));
-        if (m2) {
-            IMP orig = method_getImplementation(m2);
-            const char *te = method_getTypeEncoding(m2);
-            IMP imp = imp_implementationWithBlock(^(id self) {
-                NSString *path = ((NSString* (*)(id, SEL))orig)(self, @selector(activationStampPath));
-                LOG(@"🎣 activationStampPath=%@", path);
-                return path;
-            });
-            class_replaceMethod(actCls, @selector(activationStampPath), imp, te);
-            LOG(@"  ✅ activationStampPath");
-        }
+static void hookSetter(Class cls, NSString *propName) {
+    NSString *setterName = [NSString stringWithFormat:@"set%@%@:", 
+        [[propName substringToIndex:1] uppercaseString], 
+        [propName substringFromIndex:1]];
+    SEL setterSel = NSSelectorFromString(setterName);
+    Method m = class_getInstanceMethod(cls, setterSel);
+    if (!m) {
+        LOG(@"⚠️ setter %@ 不存在", setterName);
+        return;
     }
+    IMP orig = method_getImplementation(m);
+    const char *typeEnc = method_getTypeEncoding(m);
+    IMP newIMP = imp_implementationWithBlock(^(id self, id val) {
+        LOG(@"🔔 [%s] %@ = %@", class_getName(cls), propName, val ? [val description] : @"nil");
+        ((void (*)(id, SEL, id))orig)(self, setterSel, val);
+    });
+    class_replaceMethod(cls, setterSel, newIMP, typeEnc);
+    LOG(@"✅ hook setter: %s.%@", class_getName(cls), setterName);
+}
 
-    if (actVC) {
-        LOG(@"🎣 Hook ActVC");
-        SAFE_HOOK_0(actVC, viewDidLoad, @"🎯");
-
-        // onTapVerify
-        Method m = class_getInstanceMethod(actVC, @selector(onTapVerify));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            const char *te = method_getTypeEncoding(m);
-            IMP imp = imp_implementationWithBlock(^(id self) {
-                LOG(@"🎯 onTapVerify 入口");
-                snapIvars(self, @"ActVC_onTapVerify入口");
-                ((void (*)(id, SEL))orig)(self, @selector(onTapVerify));
-                LOG(@"🎯 onTapVerify 出口");
-                snapIvars(self, @"ActVC_onTapVerify出口");
-            });
-            class_replaceMethod(actVC, @selector(onTapVerify), imp, te);
-            LOG(@"  ✅ onTapVerify");
-        }
-
-        SAFE_HOOK_1(actVC, showError, NSString*, @"🛡️");
-
-        // showSuccess:completion: —— 只记录，透传 completion
-        Method m2 = class_getInstanceMethod(actVC, @selector(showSuccess:completion:));
-        if (m2) {
-            IMP orig = method_getImplementation(m2);
-            const char *te = method_getTypeEncoding(m2);
-            IMP imp = imp_implementationWithBlock(^(id self, id expire, id completion) {
-                LOG(@"🎉 showSuccess:%@ completion=%@", expire, completion ? @"有" : @"nil");
-                snapIvars(self, @"ActVC_showSuccess入口");
-                // 直接透传
-                ((void (*)(id, SEL, id, id))orig)(self, @selector(showSuccess:completion:), expire, completion);
-                LOG(@"🎉 showSuccess 出口");
-                snapIvars(self, @"ActVC_showSuccess出口");
-            });
-            class_replaceMethod(actVC, @selector(showSuccess:completion:), imp, te);
-            LOG(@"  ✅ showSuccess:completion:");
-        }
-
-        SAFE_HOOK_1(actVC, buildSuccessViewWithExpire, id, @"🎉");
-        SAFE_HOOK_0(actVC, setupAfterActivation, @"🎉");
-
-        // dismissViewControllerAnimated:completion: —— 只记录，透传 completion
-        Method m3 = class_getInstanceMethod(actVC, @selector(dismissViewControllerAnimated:completion:));
-        if (m3) {
-            IMP orig = method_getImplementation(m3);
-            const char *te = method_getTypeEncoding(m3);
-            IMP imp = imp_implementationWithBlock(^(id self, BOOL anim, id completion) {
-                LOG(@"🚪 dismiss animated=%d completion=%@", (int)anim, completion ? @"有" : @"nil");
-                dumpWin(@"dismiss前");
-                // 直接透传
-                ((void (*)(id, SEL, BOOL, id))orig)(self, @selector(dismissViewControllerAnimated:completion:), anim, completion);
-                LOG(@"🚪 dismiss 已调用");
-                dumpWin(@"dismiss后");
-            });
-            class_replaceMethod(actVC, @selector(dismissViewControllerAnimated:completion:), imp, te);
-            LOG(@"  ✅ dismissViewControllerAnimated:completion:");
-        }
+// ============================================================
+// Hook NSNotificationCenter postNotification
+// ============================================================
+static void hookNotifications() {
+    Class nc = [NSNotificationCenter class];
+    Method m = class_getInstanceMethod(nc, @selector(postNotificationName:object:userInfo:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, NSString *name, id obj, id info) {
+            LOG(@"📢 Notification: %@ | obj=%@ | info=%@", name, obj ? [obj description] : @"nil", info ? [info description] : @"nil");
+            ((void (*)(id, SEL, NSString*, id, id))orig)(self, @selector(postNotificationName:object:userInfo:), name, obj, info);
+        });
+        class_replaceMethod(nc, @selector(postNotificationName:object:userInfo:), newIMP, typeEnc);
     }
-
-    if (mainVC) {
-        LOG(@"🎣 Hook MainVC");
-
-        Method m1 = class_getInstanceMethod(mainVC, @selector(viewDidLoad));
-        if (m1) {
-            IMP orig = method_getImplementation(m1);
-            const char *te = method_getTypeEncoding(m1);
-            IMP imp = imp_implementationWithBlock(^(id self) {
-                LOG(@"🎯 MainVC viewDidLoad");
-                ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
-                snapIvars(self, @"MainVC_viewDidLoad");
-                dumpViews(((UIViewController*)self).view, 0);
-            });
-            class_replaceMethod(mainVC, @selector(viewDidLoad), imp, te);
-            LOG(@"  ✅ viewDidLoad");
-        }
-
-        Method m2 = class_getInstanceMethod(mainVC, @selector(viewDidAppear:));
-        if (m2) {
-            IMP orig = method_getImplementation(m2);
-            const char *te = method_getTypeEncoding(m2);
-            IMP imp = imp_implementationWithBlock(^(id self, BOOL anim) {
-                LOG(@"🎯 MainVC viewDidAppear");
-                ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), anim);
-                snapIvars(self, @"MainVC_viewDidAppear");
-                dumpViews(((UIViewController*)self).view, 0);
-
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    LOG(@"🎯 MainVC +0.1s");
-                    dumpViews(((UIViewController*)self).view, 0);
-                });
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    LOG(@"🎯 MainVC +0.5s");
-                    dumpViews(((UIViewController*)self).view, 0);
-                });
-            });
-            class_replaceMethod(mainVC, @selector(viewDidAppear:), imp, te);
-            LOG(@"  ✅ viewDidAppear:");
-        }
+    
+    Method m2 = class_getInstanceMethod(nc, @selector(postNotificationName:object:));
+    if (m2) {
+        IMP orig2 = method_getImplementation(m2);
+        const char *typeEnc2 = method_getTypeEncoding(m2);
+        IMP newIMP2 = imp_implementationWithBlock(^(id self, NSString *name, id obj) {
+            LOG(@"📢 Notification: %@ | obj=%@", name, obj ? [obj description] : @"nil");
+            ((void (*)(id, SEL, NSString*, id))orig2)(self, @selector(postNotificationName:object:), name, obj);
+        });
+        class_replaceMethod(nc, @selector(postNotificationName:object:), newIMP2, typeEnc2);
     }
+    LOG(@"✅ Notification 记录已启用");
+}
+
+// ============================================================
+// Hook ActivationVC
+// ============================================================
+static __weak id g_actVC = nil;
+
+static void hookActivationVC(Class cls) {
+    if (!cls) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
+    LOG(@"🎣 记录: %s", class_getName(cls));
+    
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [ActVC] viewDidLoad");
+            g_actVC = self;
+            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
+            snapshotProperties(self, @"ActVC(viewDidLoad)");
+        });
+        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(onTapVerify));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [ActVC] onTapVerify 被点击");
+            snapshotProperties(self, @"ActVC(点击验证前)");
+            ((void (*)(id, SEL))orig)(self, @selector(onTapVerify));
+            LOG(@"🎯 [ActVC] onTapVerify 执行完毕");
+            snapshotProperties(self, @"ActVC(点击验证后)");
+        });
+        class_replaceMethod(cls, @selector(onTapVerify), newIMP, typeEnc);
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(showSuccess:completion:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, id expire, id completion) {
+            LOG(@"🎉 [ActVC] showSuccess:completion: 被调用");
+            LOG(@"   expire = %@", expire);
+            LOG(@"   completion 类 = %@", completion ? NSStringFromClass([completion class]) : @"nil");
+            g_actVC = self;
+            snapshotProperties(self, @"ActVC(showSuccess前)");
+            ((void (*)(id, SEL, id, id))orig)(self, @selector(showSuccess:completion:), expire, completion);
+            LOG(@"🎉 [ActVC] showSuccess:completion: 执行完毕");
+            snapshotProperties(self, @"ActVC(showSuccess后)");
+        });
+        class_replaceMethod(cls, @selector(showSuccess:completion:), newIMP, typeEnc);
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(buildSuccessViewWithExpire:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, id expire) {
+            LOG(@"🎉 [ActVC] buildSuccessViewWithExpire: %@", expire);
+            snapshotProperties(self, @"ActVC(buildSuccessView)");
+            ((void (*)(id, SEL, id))orig)(self, @selector(buildSuccessViewWithExpire:), expire);
+            LOG(@"🎉 [ActVC] buildSuccessViewWithExpire 执行完毕");
+            snapshotProperties(self, @"ActVC(buildSuccessView后)");
+        });
+        class_replaceMethod(cls, @selector(buildSuccessViewWithExpire:), newIMP, typeEnc);
+    }
+    
+    // 监控 onVerify 变化
+    [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
+        if (g_actVC) {
+            @try {
+                static id lastOnVerify = nil;
+                id current = [g_actVC valueForKey:@"onVerify"];
+                if (current != lastOnVerify) {
+                    LOG(@"🔔 [ActVC] onVerify 变化: %@ -> %@", lastOnVerify?@"非nil":@"nil", current?@"非nil":@"nil");
+                    if (!current && lastOnVerify) {
+                        LOG(@"🎉 onVerify 被调用并置为 nil！");
+                        snapshotProperties(g_actVC, @"ActVC(onVerify调用后)");
+                    }
+                    lastOnVerify = current;
+                }
+            } @catch (NSException *e) {}
+        }
+    }];
+}
+
+// ============================================================
+// Hook MainVC
+// ============================================================
+static void hookViewController(Class cls) {
+    if (!cls) { LOG(@"❌ 未找到 ViewController"); return; }
+    LOG(@"🎣 记录 MainVC: %s", class_getName(cls));
+    
+    // Hook 关键 setter
+    hookSetter(cls, @"state");
+    hookSetter(cls, @"tableView");
+    hookSetter(cls, @"langSeg");
+    hookSetter(cls, @"statusText");
+    hookSetter(cls, @"dataText");
+    hookSetter(cls, @"authMaskView");
+    
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [MainVC] viewDidLoad");
+            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
+            snapshotProperties(self, @"MainVC(viewDidLoad)");
+        });
+        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(viewWillAppear:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, BOOL animated) {
+            LOG(@"🎯 [MainVC] viewWillAppear:");
+            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewWillAppear:), animated);
+            snapshotProperties(self, @"MainVC(viewWillAppear)");
+        });
+        class_replaceMethod(cls, @selector(viewWillAppear:), newIMP, typeEnc);
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, BOOL animated) {
+            LOG(@"🎯 [MainVC] viewDidAppear:");
+            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
+            snapshotProperties(self, @"MainVC(viewDidAppear)");
+        });
+        class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
+    }
+    
+    // 监控 state 变化（兜底）
+    [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer) {
+        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+            UIViewController *root = window.rootViewController;
+            if ([root isKindOfClass:cls]) {
+                @try {
+                    static NSInteger lastState = -999;
+                    id val = [root valueForKey:@"state"];
+                    NSInteger state = [val integerValue];
+                    if (state != lastState) {
+                        LOG(@"🔔 [MainVC] state 变化: %ld -> %ld", (long)lastState, (long)state);
+                        snapshotProperties(root, [NSString stringWithFormat:@"MainVC(state=%ld)", (long)state]);
+                        lastState = state;
+                    }
+                } @catch (NSException *e) {}
+                break;
+            }
+        }
+    }];
 }
 
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunRec] 真卡密纯净记录版 v5 已加载");
+    NSLog(@"[KFunRec3] 增强记录版 v3 已加载");
     NSLog(@"========================================");
-
+    
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupLogWindow();
-        hookNetwork();
-        hookAll();
+        recordNetwork();
+        hookNotifications();
+        
+        Class vcClass = objc_getClass("WWWActivationViewController");
+        if (vcClass) hookActivationVC(vcClass);
+        
+        Class mainVC = objc_getClass("ViewController");
+        if (mainVC) hookViewController(mainVC);
+        
         LOG(@"🚀 记录系统已启动");
-        LOG(@"📋 操作：输入真卡密 → 点验证 → 等主页面内容出现 → 点复制");
+        LOG(@"📋 操作：输入真卡密 → 点验证 → 等主页面内容完全显示 → 点复制发给我");
+        LOG(@"⚠️ 注意：请确保复制包含 MainVC state 变化后的完整日志");
     });
 }
