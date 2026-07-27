@@ -1,7 +1,6 @@
 //
-//  iphook.m - KFun Bypass v19 自然版
-//  策略：让 App 自己工作，只把"显示错误"改成"显示成功"
-//  onTapVerify 不拦截，showError: 拦截并调用 showSuccess:completion:
+//  iphook.m - KFun Bypass v20
+//  修复：用 NSInvocation 安全传递 block，防闪退
 //
 
 #import <UIKit/UIKit.h>
@@ -16,7 +15,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV19] %@", line);
+    NSLog(@"[KFunV20] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 15000) {
@@ -80,7 +79,7 @@ static void setupWindow(void) {
         [g_logContainer addSubview:bar];
         
         UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 20)];
-        t.text = @"🔍 KFun v19 自然版 (拖动)";
+        t.text = @"🔍 KFun v20 NSInvocation (拖动)";
         t.textColor = [UIColor cyanColor];
         t.font = [UIFont boldSystemFontOfSize:10];
         [bar addSubview:t];
@@ -105,24 +104,23 @@ static void setupWindow(void) {
         [bar addGestureRecognizer:pan];
         
         [kw addSubview:g_logContainer];
-        LOG(@"✅ v19 悬浮窗启动");
-        LOG(@"🌿 自然版：只改 showError:，让 App 自己走");
+        LOG(@"✅ v20 悬浮窗启动");
     });
 }
 
 // ============================================================
-// 🌿 自然 bypass：只把"显示错误"改成"显示成功"
+// 🌿 自然 bypass：只把 showError: 改成 showSuccess:completion:
+// 用 NSInvocation 安全传递 block
 // ============================================================
 static void naturalBypass(id vcInstance) {
-    LOG(@"🌿 自然 bypass 触发：服务器返回错误，改为成功");
+    LOG(@"🌿 自然 bypass 触发");
     
-    // 1. 停止 spinner（onTapVerify 可能已经启动了）
+    // 1. 停止 spinner
     @try {
         id spinner = [vcInstance valueForKey:@"spinner"];
         if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
             [(UIActivityIndicatorView *)spinner stopAnimating];
             [(UIActivityIndicatorView *)spinner setHidden:YES];
-            LOG(@"✅ spinner 停止");
         }
     } @catch (NSException *e) {}
     
@@ -131,11 +129,10 @@ static void naturalBypass(id vcInstance) {
         id errorLabel = [vcInstance valueForKey:@"errorLabel"];
         if (errorLabel && [errorLabel isKindOfClass:[UIView class]]) {
             [(UIView *)errorLabel setHidden:YES];
-            LOG(@"✅ errorLabel 隐藏");
         }
     } @catch (NSException *e) {}
     
-    // 3. 移除遮罩（如果有）
+    // 3. 移除遮罩
     @try {
         id mask = [vcInstance valueForKey:@"authMaskView"];
         if (mask && [mask isKindOfClass:[UIView class]]) {
@@ -144,43 +141,65 @@ static void naturalBypass(id vcInstance) {
         }
     } @catch (NSException *e) {}
     
-    // 4. ⭐ 获取 onVerify completion block（onTapVerify 内部创建的）
+    // 4. 获取 onVerify block（App 自己的 completion）
     id completion = nil;
     @try {
         completion = [vcInstance valueForKey:@"onVerify"];
-        LOG(@"🌿 onVerify completion = %@ (类型: %@)", completion, completion ? NSStringFromClass([completion class]) : @"nil");
+        LOG(@"🌿 onVerify = %@ (类型: %@)", completion, completion ? NSStringFromClass([completion class]) : @"nil");
     } @catch (NSException *e) {
         LOG(@"⚠️ 获取 onVerify 失败: %@", e.reason);
     }
     
-    // 5. ⭐ 调用 showSuccess:completion:，传入 App 自己的 completion
-    // 让 App 自己走后续流程（dismiss、设置 MainVC、加载数据等）
+    // 5. ⭐ 用 NSInvocation 安全调用 showSuccess:completion:
     @try {
-        if ([vcInstance respondsToSelector:@selector(showSuccess:completion:)]) {
-            NSString *expire = @"到期时间:2099-12-31 23:59:59";
-            if (completion) {
-                [vcInstance performSelector:@selector(showSuccess:completion:) withObject:expire withObject:completion];
-                LOG(@"✅ showSuccess:completion: 已调用（使用 App 自己的 completion）");
-            } else {
-                [vcInstance performSelector:@selector(showSuccess:completion:) withObject:expire withObject:nil];
-                LOG(@"✅ showSuccess:completion: 已调用（无 completion）");
+        SEL sel = @selector(showSuccess:completion:);
+        if ([vcInstance respondsToSelector:sel]) {
+            NSMethodSignature *sig = [vcInstance methodSignatureForSelector:sel];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setTarget:vcInstance];
+                [inv setSelector:sel];
+                
+                // 参数1: expire 字符串
+                NSString *expire = @"到期时间:2099-12-31 23:59:59";
+                [inv setArgument:&expire atIndex:2];
+                
+                // 参数2: completion block（取地址传递）
+                if (completion) {
+                    [inv setArgument:&completion atIndex:3];
+                    LOG(@"✅ NSInvocation 设置 completion");
+                } else {
+                    id nilBlock = nil;
+                    [inv setArgument:&nilBlock atIndex:3];
+                    LOG(@"✅ NSInvocation 设置 nil completion");
+                }
+                
+                [inv invoke];
+                LOG(@"✅ showSuccess:completion: 调用成功");
             }
         } else {
-            LOG(@"❌ ActVC 没有 showSuccess:completion: 方法");
+            LOG(@"❌ ActVC 没有 showSuccess:completion:");
         }
     } @catch (NSException *e) {
-        LOG(@"❌ showSuccess:completion: 失败: %@", e.reason);
+        LOG(@"❌ NSInvocation 调用失败: %@", e.reason);
+        // 备用：用 performSelector 传 nil（不传递 block）
+        @try {
+            [vcInstance performSelector:@selector(showSuccess:completion:) withObject:@"到期时间:2099-12-31 23:59:59" withObject:nil];
+            LOG(@"✅ 备用调用成功（nil completion）");
+        } @catch (NSException *e2) {
+            LOG(@"❌ 备用调用也失败: %@", e2.reason);
+        }
     }
     
-    // 6. 如果上面失败，尝试 buildSuccessViewWithExpire: 作为备用
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 6. 备用：如果 showSuccess 没触发 dismiss，3秒后手动 dismiss
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            id successView = [vcInstance valueForKey:@"successView"];
-            if (!successView || ![successView isKindOfClass:[UIView class]] || ((UIView *)successView).hidden) {
-                LOG(@"⚠️ successView 未显示，尝试 buildSuccessViewWithExpire:");
-                if ([vcInstance respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
-                    [vcInstance performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"到期时间:2099-12-31 23:59:59"];
-                    LOG(@"✅ buildSuccessViewWithExpire: 已调用");
+            if ([vcInstance isKindOfClass:[UIViewController class]]) {
+                UIViewController *vc = (UIViewController *)vcInstance;
+                if (vc.presentingViewController) {
+                    [vc dismissViewControllerAnimated:NO completion:^{
+                        LOG(@"✅ 备用 dismiss 完成");
+                    }];
                 }
             }
         } @catch (NSException *e) {}
@@ -188,12 +207,12 @@ static void naturalBypass(id vcInstance) {
 }
 
 // ============================================================
-// Hook 入口 - 最小干预
+// Hook 入口
 // ============================================================
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV19] v19 自然版已加载");
+    NSLog(@"[KFunV20] v20 NSInvocation版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -202,14 +221,13 @@ static void iphook_init() {
         Class actVC = objc_getClass("WWWActivationViewController");
         if (!actVC) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
         
-        // 1. ⭐ onTapVerify：只记录，不拦截！让 App 自己发请求
+        // 1. onTapVerify：只记录，不拦截
         Method m = class_getInstanceMethod(actVC, @selector(onTapVerify));
         if (m) {
             IMP orig = method_getImplementation(m);
             const char *te = method_getTypeEncoding(m);
             IMP newIMP = imp_implementationWithBlock(^(id self) {
-                LOG(@"🎯 [ActVC] onTapVerify 开始（不拦截，让 App 自己发请求）");
-                // 记录 onVerify 变化
+                LOG(@"🎯 [ActVC] onTapVerify 开始（不拦截）");
                 id onVerifyBefore = nil;
                 @try { onVerifyBefore = [self valueForKey:@"onVerify"]; } @catch (NSException *e) {}
                 LOG(@"🌿 onTapVerify 前: onVerify = %@", onVerifyBefore);
@@ -222,24 +240,23 @@ static void iphook_init() {
                 LOG(@"🎯 [ActVC] onTapVerify 结束");
             });
             class_replaceMethod(actVC, @selector(onTapVerify), newIMP, te);
-            LOG(@"✅ Hook onTapVerify（只记录，不拦截）");
+            LOG(@"✅ Hook onTapVerify（只记录）");
         }
         
-        // 2. ⭐ showError:：拦截，改为走成功流程
+        // 2. showError:：拦截，改为成功
         m = class_getInstanceMethod(actVC, @selector(showError:));
         if (m) {
             IMP orig = method_getImplementation(m);
             const char *te = method_getTypeEncoding(m);
             IMP newIMP = imp_implementationWithBlock(^(id self, NSString *msg) {
-                LOG(@"🛡️ showError: 拦截（服务器返回错误）msg = %@", msg);
-                // 不调用原始的 showError:，改为调用 naturalBypass
+                LOG(@"🛡️ showError: 拦截 msg = %@", msg);
                 naturalBypass(self);
             });
             class_replaceMethod(actVC, @selector(showError:), newIMP, te);
-            LOG(@"✅ Hook showError:（错误→成功）");
+            LOG(@"✅ Hook showError:（→ 成功）");
         }
         
-        // 3. isActivated / isVerified：保险返回 YES
+        // 3. isActivated / isVerified
         m = class_getInstanceMethod(actVC, @selector(isActivated));
         if (m) {
             const char *te = method_getTypeEncoding(m);
@@ -256,7 +273,7 @@ static void iphook_init() {
             LOG(@"✅ isVerified -> YES");
         }
         
-        LOG(@"🚀 v19 初始化完成");
-        LOG(@"📋 操作：输入任意15位卡密 → 点验证 → App 自己发请求 → 我们改错误为成功 → App 自己走后续");
+        LOG(@"🚀 v20 初始化完成");
+        LOG(@"📋 输入任意15位卡密 → 点验证 → 等3秒看结果");
     });
 }
