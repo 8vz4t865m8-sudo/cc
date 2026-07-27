@@ -1,45 +1,26 @@
 //
-//  kfun_observer.m
-//  KFun 零干扰观察器 - 纯记录，不拦截
-//  编译: clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//        -framework UIKit -framework Foundation \
-//        -dynamiclib -o kfun_observer.dylib kfun_observer.m
+//  iphook.m - KFun Bypass v14 (state修复版)
+//  基于 v13，增加 MainVC.state 设置和数据加载触发
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-#pragma mark - 日志系统
+#define LOG(fmt, ...) logLine([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
 static UITextView *g_logView = nil;
 static UIView *g_logContainer = nil;
 static NSMutableString *g_logBuffer = nil;
-static NSDateFormatter *g_df = nil;
 
-static NSString* ts(void) {
-    if (!g_df) {
-        g_df = [[NSDateFormatter alloc] init];
-        g_df.dateFormat = @"HH:mm:ss.SSS";
-    }
-    return [g_df stringFromDate:[NSDate date]];
-}
-
-static void logRaw(NSString *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
-    va_end(args);
-    
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts(), msg];
-    NSLog(@"[KFunO] %@", line);
-    
+static void logLine(NSString *msg) {
+    NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
+    NSLog(@"[KFunV14] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
-    [g_logBuffer appendString:line];
-    if (g_logBuffer.length > 30000) {
-        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 30000)];
+    [g_logBuffer appendFormat:@"%@\n", line];
+    if (g_logBuffer.length > 15000) {
+        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 15000)];
     }
-    
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_logView) {
             g_logView.text = g_logBuffer;
@@ -48,94 +29,70 @@ static void logRaw(NSString *fmt, ...) {
     });
 }
 
-#pragma mark - 悬浮窗
-
-@interface DragHandler : NSObject
+@interface LogDragHandler : NSObject
 @end
-@implementation DragHandler
+@implementation LogDragHandler
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIView *view = pan.view.superview;
+    CGPoint t = [pan translationInView:view.superview];
+    view.center = CGPointMake(view.center.x + t.x, view.center.y + t.y);
+    [pan setTranslation:CGPointZero inView:view.superview];
+}
+- (void)copyLog:(id)sender {
+    if (g_logBuffer && g_logBuffer.length > 0) {
+        UIPasteboard.generalPasteboard.string = g_logBuffer;
+        LOG(@"📋 已复制 (%lu 字符)", (unsigned long)g_logBuffer.length);
+    }
+}
+@end
+static LogDragHandler *g_dragHandler = nil;
 
-- (UIWindow *)keyWindow {
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]] && ((UIWindowScene *)s).activationState == UISceneActivationStateForegroundActive) {
-                UIWindowScene *ws = (UIWindowScene *)s;
-                if (ws.windows.count) return ws.windows.firstObject;
+static void setupLogWindow() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]] && ((UIWindowScene *)scene).activationState == UISceneActivationStateForegroundActive) {
+                    if (((UIWindowScene *)scene).windows.count > 0) { keyWindow = ((UIWindowScene *)scene).windows.firstObject; break; }
+                }
             }
         }
-    }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    return [UIApplication sharedApplication].keyWindow ?: [UIApplication sharedApplication].windows.firstObject;
-#pragma clang diagnostic pop
-}
-
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *v = pan.view.superview;
-    CGPoint t = [pan translationInView:v.superview];
-    v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
-    [pan setTranslation:CGPointZero inView:v.superview];
-}
-
-- (void)copyLog:(id)sender {
-    if (g_logBuffer.length) {
-        UIPasteboard.generalPasteboard.string = g_logBuffer;
-        logRaw(@"📋 已复制 (%lu 字符)", (unsigned long)g_logBuffer.length);
-    }
-}
-
-- (void)clearLog:(id)sender {
-    [g_logBuffer setString:@""];
-    g_logView.text = @"";
-}
-
-@end
-
-static DragHandler *g_drag = nil;
-
-static void setupWindow(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        DragHandler *dh = [[DragHandler alloc] init];
-        g_drag = dh;
-        UIWindow *kw = [dh keyWindow];
-        if (!kw) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupWindow(); });
-            return;
+        if (!keyWindow) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            keyWindow = [UIApplication sharedApplication].keyWindow;
+            if (!keyWindow && [UIApplication sharedApplication].windows.count > 0) keyWindow = [UIApplication sharedApplication].windows[0];
+            #pragma clang diagnostic pop
         }
+        if (!keyWindow) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupLogWindow(); }); return; }
         
-        CGFloat w = 360, h = 280;
-        g_logContainer = [[UIView alloc] initWithFrame:CGRectMake(6, 90, w, h)];
-        g_logContainer.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.92];
-        g_logContainer.layer.cornerRadius = 8;
+        CGFloat w = 350, h = 300;
+        g_logContainer = [[UIView alloc] initWithFrame:CGRectMake(8, 100, w, h)];
+        g_logContainer.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.93];
+        g_logContainer.layer.cornerRadius = 10;
         g_logContainer.layer.borderColor = [UIColor cyanColor].CGColor;
-        g_logContainer.layer.borderWidth = 1;
+        g_logContainer.layer.borderWidth = 1.2;
         
-        UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 26)];
-        bar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.95];
-        [g_logContainer addSubview:bar];
+        UIView *titleBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 28)];
+        titleBar.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+        [g_logContainer addSubview:titleBar];
         
-        UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, 180, 20)];
-        t.text = @"🔬 KFun Observer";
-        t.textColor = [UIColor cyanColor];
-        t.font = [UIFont boldSystemFontOfSize:10];
-        [bar addSubview:t];
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
+        title.text = @"🔍 KFun v14 state修复 (拖动)";
+        title.textColor = [UIColor cyanColor];
+        title.font = [UIFont boldSystemFontOfSize:10];
+        [titleBar addSubview:title];
         
         UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        copyBtn.frame = CGRectMake(w-70, 2, 65, 22);
-        [copyBtn setTitle:@">📋复制" forState:UIControlStateNormal];
-        copyBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+        copyBtn.frame = CGRectMake(w-70, 3, 65, 22);
+        [copyBtn setTitle:@"📋复制" forState:UIControlStateNormal];
+        copyBtn.titleLabel.font = [UIFont systemFontOfSize:9];
         [copyBtn setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
-        [copyBtn addTarget:dh action:@selector(copyLog:) forControlEvents:UIControlEventTouchUpInside];
-        [bar addSubview:copyBtn];
+        g_dragHandler = [[LogDragHandler alloc] init];
+        [copyBtn addTarget:g_dragHandler action:@selector(copyLog:) forControlEvents:UIControlEventTouchUpInside];
+        [titleBar addSubview:copyBtn];
         
-        UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        clearBtn.frame = CGRectMake(w-130, 2, 55, 22);
-        [clearBtn setTitle:@">🧹清空" forState:UIControlStateNormal];
-        clearBtn.titleLabel.font = [UIFont systemFontOfSize:10];
-        [clearBtn setTitleColor:[UIColor orangeColor] forState:UIControlStateNormal];
-        [clearBtn addTarget:dh action:@selector(clearLog:) forControlEvents:UIControlEventTouchUpInside];
-        [bar addSubview:clearBtn];
-        
-        g_logView = [[UITextView alloc] initWithFrame:CGRectMake(2, 28, w-4, h-30)];
+        g_logView = [[UITextView alloc] initWithFrame:CGRectMake(2, 30, w-4, h-32)];
         g_logView.textColor = [UIColor greenColor];
         g_logView.font = [UIFont fontWithName:@"Menlo" size:8];
         g_logView.backgroundColor = [UIColor clearColor];
@@ -143,203 +100,313 @@ static void setupWindow(void) {
         g_logView.selectable = YES;
         [g_logContainer addSubview:g_logView];
         
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:dh action:@selector(handlePan:)];
-        [bar addGestureRecognizer:pan];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:g_dragHandler action:@selector(handlePan:)];
+        [titleBar addGestureRecognizer:pan];
         
-        [kw addSubview:g_logContainer];
-        logRaw(@"✅ 观察器启动 - 零干扰模式");
+        [keyWindow addSubview:g_logContainer];
+        LOG(@"✅ 悬浮窗已启动 v14");
     });
 }
 
-#pragma mark - 属性快照（轻量）
-
-static void snap(id obj, NSString *label) {
-    if (!obj) return;
-    logRaw(@"📸 [%@] %@", label, NSStringFromClass([obj class]));
+static void snapshotProperties(id obj, NSString *label) {
+    if (!obj) { LOG(@"❌ %@ nil", label); return; }
+    LOG(@"📸 [%@] begin", label);
     unsigned int count = 0;
     objc_property_t *props = class_copyPropertyList(object_getClass(obj), &count);
-    for (unsigned int i = 0; i < count && i < 30; i++) {  // 限制30个属性，防卡
+    for (unsigned int i = 0; i < count; i++) {
         NSString *name = [NSString stringWithUTF8String:property_getName(props[i])];
         @try {
             id val = [obj valueForKey:name];
             NSString *desc = val ? [val description] : @"nil";
-            if (desc.length > 80) desc = [desc substringToIndex:80];
-            logRaw(@"   %@ = %@", name, desc);
-        } @catch (NSException *e) {}
+            if (desc.length > 100) desc = [desc substringToIndex:100];
+            LOG(@"   %@ = %@", name, desc);
+        } @catch (NSException *e) {
+            LOG(@"   %@ = [err:%@]", name, e.reason);
+        }
     }
     if (props) free(props);
+    LOG(@"📸 [%@] end", label);
 }
 
-#pragma mark - 网络观察（只记录，不拦截）
-
-static void observeNetwork(void) {
-    Class cls = [NSURLSession class];
+// ============================================================
+// 🚀 Bypass 核心 - v14 修复版
+// ============================================================
+static void doBypass(id vcInstance) {
+    LOG(@"🚀 Bypass v14 开始");
     
-    Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
-    if (m1) {
-        IMP orig = method_getImplementation(m1);
-        const char *te = method_getTypeEncoding(m1);
-        IMP newIMP = imp_implementationWithBlock(^(id self, NSURL *url, id completion) {
-            logRaw(@"🌐 GET %@", url.absoluteString);
-            id wrapped = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-                NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
-                logRaw(@"🌐 RES %@ | %ld | %@", url.absoluteString, (long)(http?http.statusCode:0), err?err.localizedDescription:@"ok");
-                if (data && data.length < 1500) {
-                    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                    if (body && body.length < 500) logRaw(@"🌐 BODY %@", body);
-                }
-                if (completion) ((void(^)(NSData*,NSURLResponse*,NSError*))completion)(data, resp, err);
-            };
-            return ((id (*)(id, SEL, NSURL*, id))orig)(self, @selector(dataTaskWithURL:completionHandler:), url, wrapped);
-        });
-        class_replaceMethod(cls, @selector(dataTaskWithURL:completionHandler:), newIMP, te);
-    }
-    
-    Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-    if (m2) {
-        IMP orig = method_getImplementation(m2);
-        const char *te = method_getTypeEncoding(m2);
-        IMP newIMP = imp_implementationWithBlock(^(id self, NSURLRequest *req, id completion) {
-            NSString *bodyStr = nil;
-            if (req.HTTPBody) {
-                bodyStr = [[NSString alloc] initWithData:req.HTTPBody encoding:NSUTF8StringEncoding];
-                if (!bodyStr) bodyStr = [req.HTTPBody base64EncodedStringWithOptions:0];
-            }
-            logRaw(@"🌐 REQ %@ %@ | body=%@", req.HTTPMethod, req.URL.absoluteString, bodyStr ?: @"nil");
-            id wrapped = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-                NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
-                logRaw(@"🌐 RES %@ | %ld | %@", req.URL.absoluteString, (long)(http?http.statusCode:0), err?err.localizedDescription:@"ok");
-                if (data && data.length < 1500) {
-                    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                    if (body && body.length < 500) logRaw(@"🌐 BODY %@", body);
-                }
-                if (completion) ((void(^)(NSData*,NSURLResponse*,NSError*))completion)(data, resp, err);
-            };
-            return ((id (*)(id, SEL, NSURLRequest*, id))orig)(self, @selector(dataTaskWithRequest:completionHandler:), req, wrapped);
-        });
-        class_replaceMethod(cls, @selector(dataTaskWithRequest:completionHandler:), newIMP, te);
-    }
-    
-    logRaw(@"✅ 网络观察启用");
-}
-
-#pragma mark - 通知观察（只记录）
-
-static void observeNotifications(void) {
-    Class nc = [NSNotificationCenter class];
-    
-    Method m1 = class_getInstanceMethod(nc, @selector(postNotificationName:object:userInfo:));
-    if (m1) {
-        IMP orig = method_getImplementation(m1);
-        const char *te = method_getTypeEncoding(m1);
-        IMP newIMP = imp_implementationWithBlock(^(id self, NSString *name, id obj, NSDictionary *info) {
-            logRaw(@"📢 POST %@ | info=%@", name, info);
-            ((void (*)(id, SEL, NSString*, id, NSDictionary*))orig)(self, @selector(postNotificationName:object:userInfo:), name, obj, info);
-        });
-        class_replaceMethod(nc, @selector(postNotificationName:object:userInfo:), newIMP, te);
-    }
-    
-    logRaw(@"✅ 通知观察启用");
-}
-
-#pragma mark - UserDefaults 观察（只记录，不改值）
-
-static void observeDefaults(void) {
-    Class ud = [NSUserDefaults class];
-    
-    Method m1 = class_getInstanceMethod(ud, @selector(setObject:forKey:));
-    if (m1) {
-        IMP orig = method_getImplementation(m1);
-        const char *te = method_getTypeEncoding(m1);
-        IMP newIMP = imp_implementationWithBlock(^(id self, id val, NSString *key) {
-            NSString *desc = [val description];
-            if (desc.length > 100) desc = [desc substringToIndex:100];
-            logRaw(@"💾 SET %@ = %@", key, desc);
-            ((void (*)(id, SEL, id, NSString*))orig)(self, @selector(setObject:forKey:), val, key);
-        });
-        class_replaceMethod(ud, @selector(setObject:forKey:), newIMP, te);
-    }
-    
-    Method m2 = class_getInstanceMethod(ud, @selector(objectForKey:));
-    if (m2) {
-        IMP orig = method_getImplementation(m2);
-        const char *te = method_getTypeEncoding(m2);
-        IMP newIMP = imp_implementationWithBlock(^(id self, NSString *key) {
-            id val = ((id (*)(id, SEL, NSString*))orig)(self, @selector(objectForKey:), key);
-            logRaw(@"💾 GET %@ = %@", key, val ? @"有值" : @"nil");
-            return val;
-        });
-        class_replaceMethod(ud, @selector(objectForKey:), newIMP, te);
-    }
-    
-    logRaw(@"✅ UD观察启用");
-}
-
-#pragma mark - 生命周期观察（只快照，不拦截）
-
-static void observeLifecycle(void) {
-    // ActVC - 只观察 viewDidLoad 和 dealloc，不碰验证方法
-    Class actVC = objc_getClass("WWWActivationViewController");
-    if (actVC) {
-        Method m = class_getInstanceMethod(actVC, @selector(viewDidLoad));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            const char *te = method_getTypeEncoding(m);
-            IMP newIMP = imp_implementationWithBlock(^(id self) {
-                logRaw(@"🎯 [ActVC] viewDidLoad");
-                ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
-                snap(self, @"ActVC");
-            });
-            class_replaceMethod(actVC, @selector(viewDidLoad), newIMP, te);
+    // 1. 停止 spinner
+    @try {
+        id spinner = [vcInstance valueForKey:@"spinner"];
+        if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
+            [(UIActivityIndicatorView *)spinner stopAnimating];
+            [(UIActivityIndicatorView *)spinner setHidden:YES];
+            LOG(@"✅ spinner 停止");
         }
-        logRaw(@"🎣 ActVC 已观察");
+    } @catch (NSException *e) {}
+    
+    // 2. 隐藏错误提示
+    @try {
+        id errorLabel = [vcInstance valueForKey:@"errorLabel"];
+        if (errorLabel && [errorLabel isKindOfClass:[UIView class]]) {
+            [(UIView *)errorLabel setHidden:YES];
+        }
+    } @catch (NSException *e) {}
+    
+    // 3. 移除遮罩
+    @try {
+        id mask = [vcInstance valueForKey:@"authMaskView"];
+        if (mask && [mask isKindOfClass:[UIView class]]) {
+            [(UIView *)mask setHidden:YES];
+            [(UIView *)mask removeFromSuperview];
+            LOG(@"✅ authMaskView 移除");
+        }
+    } @catch (NSException *e) {}
+    
+    // 4. 调用 showSuccess:completion:
+    @try {
+        if ([vcInstance respondsToSelector:@selector(showSuccess:completion:)]) {
+            LOG(@"⭐ 调用 showSuccess:completion:...");
+            __weak id weakVC = vcInstance;
+            id completionBlock = ^(void) {
+                LOG(@"🎉 completion block 执行！");
+                __strong id strongVC = weakVC;
+                if (strongVC) {
+                    if ([strongVC respondsToSelector:@selector(setupAfterActivation)]) {
+                        [strongVC performSelector:@selector(setupAfterActivation)];
+                        LOG(@"✅ setupAfterActivation 已调用");
+                    }
+                    snapshotProperties(strongVC, @"ActVC(completion后)");
+                }
+            };
+            [vcInstance performSelector:@selector(showSuccess:completion:) withObject:@"到期时间:2099-12-31 23:59:59" withObject:completionBlock];
+            LOG(@"✅ showSuccess:completion: 已调用");
+        }
+    } @catch (NSException *e) {
+        LOG(@"❌ showSuccess:completion: 失败: %@", e.reason);
     }
     
-    // MainVC
-    Class mainVC = objc_getClass("ViewController");
-    if (mainVC) {
-        Method m = class_getInstanceMethod(mainVC, @selector(viewDidLoad));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            const char *te = method_getTypeEncoding(m);
-            IMP newIMP = imp_implementationWithBlock(^(id self) {
-                logRaw(@"🎯 [MainVC] viewDidLoad");
-                ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
-                snap(self, @"MainVC");
-            });
-            class_replaceMethod(mainVC, @selector(viewDidLoad), newIMP, te);
+    // 5. 调用 buildSuccessViewWithExpire:
+    @try {
+        if ([vcInstance respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+            [vcInstance performSelector:@selector(buildSuccessViewWithExpire:) withObject:@"到期时间:2099-12-31 23:59:59"];
+            LOG(@"✅ buildSuccessViewWithExpire: 已调用");
         }
+    } @catch (NSException *e) { LOG(@"❌ buildSuccessViewWithExpire: %@", e.reason); }
+    
+    // ============================================================
+    // ⭐ v14 核心修复：设置 MainVC.state 触发数据加载
+    // ============================================================
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LOG(@"⭐ 开始修复 MainVC state...");
         
-        m = class_getInstanceMethod(mainVC, @selector(viewDidAppear:));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            const char *te = method_getTypeEncoding(m);
-            IMP newIMP = imp_implementationWithBlock(^(id self, BOOL anim) {
-                logRaw(@"🎯 [MainVC] viewDidAppear:");
-                ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), anim);
-                snap(self, @"MainVC-appear");
-            });
-            class_replaceMethod(mainVC, @selector(viewDidAppear:), newIMP, te);
+        Class mainVCClass = objc_getClass("ViewController");
+        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+            UIViewController *root = window.rootViewController;
+            if ([root isKindOfClass:mainVCClass]) {
+                LOG(@"🎯 找到 MainVC");
+                snapshotProperties(root, @"MainVC(修复前)");
+                
+                // 尝试设置 state = 1（最常见的"已验证"状态值）
+                @try {
+                    if ([root respondsToSelector:@selector(setState:)]) {
+                        [root performSelector:@selector(setState:) withObject:@(1)];
+                        LOG(@"✅ setState:1 已调用");
+                    }
+                    // 也尝试直接设置 _state ivar
+                    Ivar stateIvar = class_getInstanceVariable([root class], "_state");
+                    if (stateIvar) {
+                        object_setIvar(root, stateIvar, @(1));
+                        LOG(@"✅ _state = 1 (直接设置ivar)");
+                    }
+                } @catch (NSException *e) {
+                    LOG(@"❌ setState:1 失败: %@", e.reason);
+                }
+                
+                // 尝试设置 statusText
+                @try {
+                    if ([root respondsToSelector:@selector(setStatusText:)]) {
+                        [root performSelector:@selector(setStatusText:) withObject:@"已激活"];
+                        LOG(@"✅ setStatusText: 已调用");
+                    }
+                } @catch (NSException *e) {}
+                
+                // 尝试调用 viewDidLoad 重新加载（如果它内部有根据 state 加载数据的逻辑）
+                @try {
+                    if ([root respondsToSelector:@selector(viewDidLoad)]) {
+                        // 不要直接调 viewDidLoad，尝试找可能的数据加载方法
+                        // 常见命名：loadData、refreshData、reloadData、fetchData、updateData
+                        NSArray *possibleMethods = @[
+                            @"loadData", @"refreshData", @"reloadData", @"fetchData", @"updateData",
+                            @"loadConfig", @"refreshConfig", @"fetchConfig", @"updateConfig",
+                            @"startRadar", @"startLoading", @"initialize", @"setupUI",
+                            @"loadContent", @"refreshContent", @"updateUI", @"renderUI"
+                        ];
+                        for (NSString *methodName in possibleMethods) {
+                            SEL sel = NSSelectorFromString(methodName);
+                            if ([root respondsToSelector:sel]) {
+                                [root performSelector:sel];
+                                LOG(@"✅ 调用 %@ 成功", methodName);
+                                break;
+                            }
+                        }
+                    }
+                } @catch (NSException *e) {
+                    LOG(@"❌ 数据加载方法调用失败: %@", e.reason);
+                }
+                
+                // 延迟后快照
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    snapshotProperties(root, @"MainVC(修复后)");
+                });
+                
+                break;
+            }
         }
-        logRaw(@"🎣 MainVC 已观察");
+    });
+    
+    // 6. 延迟 dismiss
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            if ([vcInstance isKindOfClass:[UIViewController class]]) {
+                UIViewController *vc = (UIViewController *)vcInstance;
+                if (vc.presentingViewController) {
+                    [vc dismissViewControllerAnimated:NO completion:^{
+                        LOG(@"✅ dismiss 完成");
+                    }];
+                }
+            }
+        } @catch (NSException *e) {}
+    });
+}
+
+// ============================================================
+// Hook 入口
+// ============================================================
+static void hookActivationVC(Class cls) {
+    if (!cls) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
+    LOG(@"🎣 Hook: %s", class_getName(cls));
+    
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [ActVC] viewDidLoad");
+            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
+        });
+        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
+        LOG(@"  ✅ viewDidLoad");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(onTapVerify));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 onTapVerify 拦截");
+            doBypass(self);
+        });
+        class_replaceMethod(cls, @selector(onTapVerify), newIMP, typeEnc);
+        LOG(@"  ✅ onTapVerify");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(showError:));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, NSString *msg) {
+            LOG(@"🛡️ showError 拦截: %@", msg);
+            doBypass(self);
+        });
+        class_replaceMethod(cls, @selector(showError:), newIMP, typeEnc);
+        LOG(@"  ✅ showError:");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(isActivated));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            return YES;
+        });
+        class_replaceMethod(cls, @selector(isActivated), newIMP, typeEnc);
+        LOG(@"  ✅ isActivated -> YES");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(isVerified));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            return YES;
+        });
+        class_replaceMethod(cls, @selector(isVerified), newIMP, typeEnc);
+        LOG(@"  ✅ isVerified -> YES");
     }
 }
 
-#pragma mark - 入口
+static void hookViewController(Class cls) {
+    if (!cls) { LOG(@"❌ 未找到 ViewController"); return; }
+    LOG(@"🎣 Hook MainVC: %s", class_getName(cls));
+    
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [MainVC] viewDidLoad");
+            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
+            snapshotProperties(self, @"MainVC(viewDidLoad)");
+        });
+        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
+        LOG(@"  ✅ viewDidLoad");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, BOOL animated) {
+            LOG(@"🎯 [MainVC] viewDidAppear:");
+            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
+            snapshotProperties(self, @"MainVC(viewDidAppear)");
+        });
+        class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
+        LOG(@"  ✅ viewDidAppear:");
+    }
+    
+    // ⭐ v14 新增：监听 setState: 变化
+    m = class_getInstanceMethod(cls, @selector(setState:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, NSInteger state) {
+            LOG(@"🔔 [MainVC] setState: %ld", (long)state);
+            ((void (*)(id, SEL, NSInteger))orig)(self, @selector(setState:), state);
+            snapshotProperties(self, [NSString stringWithFormat:@"MainVC(setState:%ld)", (long)state]);
+        });
+        class_replaceMethod(cls, @selector(setState:), newIMP, typeEnc);
+        LOG(@"  ✅ setState: (监听)");
+    }
+}
 
 __attribute__((constructor))
-static void kfun_observer_init() {
-    NSLog(@"[KFunO] 观察器加载");
+static void iphook_init() {
+    NSLog(@"========================================");
+    NSLog(@"[KFunV14] v14 state修复版已加载");
+    NSLog(@"========================================");
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        setupWindow();
-        observeNetwork();
-        observeNotifications();
-        observeDefaults();
-        observeLifecycle();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        setupLogWindow();
         
-        logRaw(@"🚀 零干扰观察器就绪");
-        logRaw(@"📋 请用正版卡密正常验证");
-        logRaw(@"📋 验证通过后点 📋复制 导出日志");
+        Class vcClass = objc_getClass("WWWActivationViewController");
+        if (vcClass) hookActivationVC(vcClass);
+        
+        Class mainVC = objc_getClass("ViewController");
+        if (mainVC) hookViewController(mainVC);
+        
+        LOG(@"🚀 初始化完成 v14");
+        LOG(@"📋 操作：打开软件 → 点验证 → 观察主页面是否加载内容");
+        LOG(@"📋 如果仍空白，复制日志发给我，我会调整 state 值");
     });
 }
