@@ -1,6 +1,5 @@
 //
-//  iphook.m - KFun 极简记录版 v4
-//  只记录：网络、state变化、关键方法触发
+//  iphook.m - KFun 极简记录版 v4-fix
 //
 
 #import <UIKit/UIKit.h>
@@ -84,7 +83,7 @@ static void setupLogWindow() {
         [titleBar addSubview:title];
         
         UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        copyBtn.frame = CGRectMake(w-60, 2, 55, 20];
+        copyBtn.frame = CGRectMake(w-60, 2, 55, 20);
         [copyBtn setTitle:@"📋复制" forState:UIControlStateNormal];
         copyBtn.titleLabel.font = [UIFont systemFontOfSize:8];
         [copyBtn setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
@@ -114,7 +113,6 @@ static void setupLogWindow() {
 static void recordNetwork() {
     Class cls = [NSURLSession class];
     
-    // GET
     Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
     if (m1) {
         IMP orig = method_getImplementation(m1);
@@ -136,7 +134,6 @@ static void recordNetwork() {
         class_replaceMethod(cls, @selector(dataTaskWithURL:completionHandler:), newIMP, typeEnc);
     }
     
-    // POST
     Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
     if (m2) {
         IMP orig = method_getImplementation(m2);
@@ -259,7 +256,10 @@ static void iphook_init() {
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
             static NSInteger lastState = -1;
             static id lastMainVC = nil;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
             for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            #pragma clang diagnostic pop
                 UIViewController *r = w.rootViewController;
                 if ([r isKindOfClass:mainVC]) {
                     if (r != lastMainVC) {
