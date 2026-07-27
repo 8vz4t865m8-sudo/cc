@@ -1,8 +1,8 @@
 //
-//  kfun_recorder.m
-//  正版卡密记录版 - 只记录，不拦截，不卡
+//  kfun_recorder_safe.m
+//  正版卡密记录版 - 不包装 completion，防闪退
 //  编译: clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//        -framework UIKit -framework Foundation -dynamiclib -o kfun_recorder.dylib kfun_recorder.m
+//        -framework UIKit -framework Foundation -dynamiclib -o kfun_recorder.dylib kfun_recorder_safe.m
 //
 
 #import <UIKit/UIKit.h>
@@ -81,7 +81,7 @@ static void setupWindow(void) {
         [g_logContainer addSubview:bar];
         
         UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 20)];
-        t.text = @"🔍 正版记录版 (拖动)";
+        t.text = @"🔍 正版记录版-safe (拖动)";
         t.textColor = [UIColor cyanColor];
         t.font = [UIFont boldSystemFontOfSize:10];
         [bar addSubview:t];
@@ -106,8 +106,8 @@ static void setupWindow(void) {
         [bar addGestureRecognizer:pan];
         
         [kw addSubview:g_logContainer];
-        LOG(@"✅ 记录器启动");
-        LOG(@"📋 请用正版卡密正常验证");
+        LOG(@"✅ 记录器启动-safe");
+        LOG(@"📋 请用正版卡密正常验证，不要点其他东西");
     });
 }
 
@@ -119,21 +119,21 @@ static void snap(id obj, NSString *label) {
     objc_property_t *props = class_copyPropertyList(object_getClass(obj), &count);
     for (unsigned int i = 0; i < count; i++) {
         NSString *name = [NSString stringWithUTF8String:property_getName(props[i])];
-        // 只关注关键属性，减少日志量
         if (![name isEqualToString:@"state"] && 
             ![name isEqualToString:@"tableView"] && 
             ![name isEqualToString:@"statusText"] && 
             ![name isEqualToString:@"dataText"] && 
             ![name isEqualToString:@"authMaskView"] &&
-            ![name hasPrefix:@"busy"] &&
+            ![name isEqualToString:@"busy"] &&
+            ![name isEqualToString:@"onVerify"] &&
             ![name hasSuffix:@"Data"] &&
             ![name hasSuffix:@"Result"] &&
             ![name hasSuffix:@"Response"] &&
             ![name hasSuffix:@"Info"] &&
             ![name hasSuffix:@"Config"] &&
             ![name hasSuffix:@"Token"] &&
-            ![name hasSuffix:@"Key"]) continue;
-        
+            ![name hasSuffix:@"Key"] &&
+            ![name hasSuffix:@"Expire"]) continue;
         @try {
             id val = [obj valueForKey:name];
             NSString *desc = val ? [val description] : @"nil";
@@ -144,31 +144,6 @@ static void snap(id obj, NSString *label) {
     if (props) free(props);
 }
 
-// 递归查找
-static UIViewController *findVC(Class target, UIViewController *vc) {
-    if (!vc) return nil;
-    if ([vc isKindOfClass:target]) return vc;
-    UIViewController *found = findVC(target, [vc presentedViewController]);
-    if (found) return found;
-    for (UIViewController *c in [vc childViewControllers]) {
-        found = findVC(target, c);
-        if (found) return found;
-    }
-    if ([vc isKindOfClass:[UITabBarController class]]) {
-        for (UIViewController *c in [(UITabBarController *)vc viewControllers]) {
-            found = findVC(target, c);
-            if (found) return found;
-        }
-    }
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        for (UIViewController *c in [(UINavigationController *)vc viewControllers]) {
-            found = findVC(target, c);
-            if (found) return found;
-        }
-    }
-    return nil;
-}
-
 __attribute__((constructor))
 static void init() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -177,7 +152,7 @@ static void init() {
         Class actVC = objc_getClass("WWWActivationViewController");
         Class mainVC = objc_getClass("ViewController");
         
-        // Hook ActVC.onTapVerify
+        // Hook ActVC.onTapVerify - 只记录，不拦截逻辑
         Method m = class_getInstanceMethod(actVC, @selector(onTapVerify));
         if (m) {
             IMP orig = method_getImplementation(m);
@@ -193,27 +168,25 @@ static void init() {
             LOG(@"✅ Hook onTapVerify");
         }
         
-        // Hook ActVC.showSuccess:completion:
+        // Hook ActVC.showSuccess:completion: - 只记录，不包装completion
         m = class_getInstanceMethod(actVC, @selector(showSuccess:completion:));
         if (m) {
             IMP orig = method_getImplementation(m);
             const char *te = method_getTypeEncoding(m);
             IMP newIMP = imp_implementationWithBlock(^(id self, id expire, id completion) {
                 LOG(@"🎉 [ActVC] showSuccess:completion: expire=%@", expire);
+                LOG(@"🎉 [ActVC] completion类型=%@", completion ? NSStringFromClass([completion class]) : @"nil");
                 snap(self, @"ActVC(showSuccess前)");
-                id wrapped = ^(void) {
-                    LOG(@"🎉 [ActVC] completion 执行");
-                    if (completion) ((void(^)(void))completion)();
-                    snap(self, @"ActVC(completion后)");
-                };
-                ((void (*)(id, SEL, id, id))orig)(self, @selector(showSuccess:completion:), expire, wrapped);
+                // ⭐ 关键：直接透传原completion，不包装！
+                ((void (*)(id, SEL, id, id))orig)(self, @selector(showSuccess:completion:), expire, completion);
                 LOG(@"🎉 [ActVC] showSuccess:completion: 返回");
+                snap(self, @"ActVC(showSuccess后)");
             });
             class_replaceMethod(actVC, @selector(showSuccess:completion:), newIMP, te);
             LOG(@"✅ Hook showSuccess:completion:");
         }
         
-        // Hook ActVC.setupAfterActivation
+        // Hook ActVC.setupAfterActivation - 只记录
         m = class_getInstanceMethod(actVC, @selector(setupAfterActivation));
         if (m) {
             IMP orig = method_getImplementation(m);
@@ -226,7 +199,7 @@ static void init() {
             LOG(@"✅ Hook setupAfterActivation");
         }
         
-        // Hook MainVC.setState:
+        // Hook MainVC.setState: - 只记录
         m = class_getInstanceMethod(mainVC, @selector(setState:));
         if (m) {
             IMP orig = method_getImplementation(m);
@@ -240,7 +213,7 @@ static void init() {
             LOG(@"✅ Hook setState:");
         }
         
-        // Hook MainVC.viewDidLoad
+        // Hook MainVC.viewDidLoad - 只记录
         m = class_getInstanceMethod(mainVC, @selector(viewDidLoad));
         if (m) {
             IMP orig = method_getImplementation(m);
@@ -254,7 +227,7 @@ static void init() {
             LOG(@"✅ Hook viewDidLoad");
         }
         
-        // Hook MainVC.viewDidAppear:
+        // Hook MainVC.viewDidAppear: - 只记录
         m = class_getInstanceMethod(mainVC, @selector(viewDidAppear:));
         if (m) {
             IMP orig = method_getImplementation(m);
@@ -268,6 +241,6 @@ static void init() {
             LOG(@"✅ Hook viewDidAppear:");
         }
         
-        LOG(@"🚀 记录器就绪，请用正版卡密验证");
+        LOG(@"🚀 记录器就绪-safe，请用正版卡密验证");
     });
 }
