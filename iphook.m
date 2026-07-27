@@ -87,7 +87,7 @@ static void setupWindow(void) {
         [bar addSubview:t];
         
         UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        copyBtn.frame = CGRectMake(w-70, 2, 65, 22）;
+        copyBtn.frame = CGRectMake(w-70, 2, 65, 22);
         [copyBtn setTitle:@"📋复制" forState:UIControlStateNormal];
         copyBtn.titleLabel.font = [UIFont systemFontOfSize:9];
         [copyBtn setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
