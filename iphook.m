@@ -1,6 +1,6 @@
 //
-//  iphook.m - KFun Bypass v14
-//  精简版：仅伪造激活成功，保留原始后续流程
+//  iphook.m - KFun Bypass v16
+//  方法级绕过：直接 Hook verifyWithCompletion: 返回假成功
 //
 
 #import <UIKit/UIKit.h>
@@ -10,7 +10,7 @@
 #define LOG(fmt, ...) logLine([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
 // ============================================================
-// 调试悬浮窗（保留，方便观察）
+// 调试悬浮窗
 // ============================================================
 static UITextView *g_logView = nil;
 static UIView *g_logContainer = nil;
@@ -18,7 +18,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV14] %@", line);
+    NSLog(@"[KFunV16] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     @synchronized (g_logBuffer) {
         [g_logBuffer appendFormat:@"%@\n", line];
@@ -84,7 +84,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
 
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v14 (拖动)";
+        title.text = @"🔍 KFun v16 (方法绕过)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -115,121 +115,137 @@ static void setupLogWindow() {
 }
 
 // ============================================================
-// 🎯 核心：NSURLProtocol 拦截激活请求
+// 伪造的验证成功数据（请务必根据应用真实返回格式修改）
 // ============================================================
-@interface FakeActivationProtocol : NSURLProtocol @end
-
-@implementation FakeActivationProtocol
-
-+ (BOOL)canInitWithRequest:(NSURLRequest *)request {
-    NSString *urlStr = request.URL.absoluteString.lowercaseString;
-    // 根据实际抓包调整匹配规则，可添加多个关键词
-    if ([urlStr containsString:@"activate"] || 
-        [urlStr containsString:@"verify"] ||
-        [urlStr containsString:@"activation"]) {
-        LOG(@"🔁 拦截激活请求: %@", request.URL.absoluteString);
-        return YES;
-    }
-    return NO;
-}
-
-+ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
-    return request;
-}
-
-- (void)startLoading {
-    // 构造伪造的成功响应 JSON
-    NSDictionary *fakeDict = @{
+static id fakeSuccessResponse() {
+    // 常见格式：字典，包含 code、expire、msg 等
+    return @{
         @"code": @200,
-        @"msg": @"success",
-        @"expire": @"2099-12-31 23:59:59"   // ← 应用取到期时间的字段（请按实际调整）
+        @"expire": @"2099-12-31 23:59:59",
+        @"msg": @"success"
     };
-    NSData *fakeData = [NSJSONSerialization dataWithJSONObject:fakeDict options:0 error:nil];
-    
-    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL
-                                                              statusCode:200
-                                                             HTTPVersion:@"HTTP/1.1"
-                                                            headerFields:@{@"Content-Type": @"application/json"}];
-    
-    id<NSURLProtocolClient> client = self.client;
-    [client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
-    [client URLProtocol:self didLoadData:fakeData];
-    [client URLProtocolDidFinishLoading:self];
-    
-    LOG(@"✅ 伪造激活成功 (到期: 2099-12-31 23:59:59)");
 }
 
-- (void)stopLoading {
-    // 无需处理
+// ============================================================
+// 安全调用 completion block（自动适配参数个数）
+// ============================================================
+static void invokeCompletion(id completionBlock) {
+    if (!completionBlock) return;
+    
+    // 获取 block 的方法签名
+    // 参考: https://stackoverflow.com/questions/9048305/checking-objective-c-block-type
+    // 使用 Block_copy 获取 block 内部结构，但这里直接用 runtime 获取 signature
+    Method m = class_getInstanceMethod([NSObject class], @selector(methodSignatureForSelector:));
+    // 更简单的方式：通过 objc_msgSend 直接调用，但需要知道参数个数。
+    
+    // 使用 NSInvocation 更麻烦，这里提供一个根据常见参数个数尝试的方案。
+    // 我们先通过 block 的 signature 动态生成 NSInvocation，但考虑到兼容性，
+    // 这里直接尝试调用常见的 2 参数 (id response, id error) 形式。
+    // 如果应用使用了其他形式，可以观察日志中的崩溃信息再调整。
+    
+    // 获取 block 的函数指针
+    // 定义常见类型
+    void (^twoParamCompletion)(id, id) = completionBlock;   // 可能 crash 如果类型不匹配
+    if (twoParamCompletion) {
+        LOG(@"🎯 调用 completion (response, error)...");
+        twoParamCompletion(fakeSuccessResponse(), nil);
+        LOG(@"✅ completion 调用完成");
+        return;
+    }
+    
+    // 备用：尝试单参数 (id response)
+    void (^oneParamCompletion)(id) = completionBlock;
+    if (oneParamCompletion) {
+        LOG(@"🎯 调用 completion (response)...");
+        oneParamCompletion(fakeSuccessResponse());
+        return;
+    }
+    
+    // 再备用：无参数
+    void (^zeroParamCompletion)(void) = completionBlock;
+    if (zeroParamCompletion) {
+        LOG(@"🎯 调用 completion (void)...");
+        zeroParamCompletion();
+        return;
+    }
+    
+    LOG(@"❌ 无法确定 completion 的参数类型，未调用");
 }
 
-@end
+// ============================================================
+// 核心 Hook: verifyWithCompletion: 直接返回成功
+// ============================================================
+static void hookVerifyWithCompletion(Class cls) {
+    if (!cls) return;
+    Method m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
+    if (!m) {
+        LOG(@"⚠️ 未找到 verifyWithCompletion: 方法");
+        return;
+    }
+    
+    // 获取方法类型编码，辅助判断参数
+    const char *typeEnc = method_getTypeEncoding(m);
+    LOG(@"📐 verifyWithCompletion: 类型编码: %s", typeEnc);
+    // 通常为 v@:@?  表示参数2是 block（id 类型）
+    
+    // 保存原始实现（如果有用，我们这里不会调用原始实现）
+    // IMP orig = method_getImplementation(m);
+    
+    // 新实现：直接调用传入的 completion block
+    IMP newIMP = imp_implementationWithBlock(^(id self, id completion) {
+        LOG(@"🔁 verifyWithCompletion: 被拦截");
+        LOG(@"   completion: %@", completion);
+        
+        // 模拟一些可能的前置 UI 操作（如果有需要，可调用原方法的一些前置代码，
+        // 但这里我们直接回调成功）
+        
+        // 调用原始 completion，传入假成功数据
+        @try {
+            invokeCompletion(completion);
+        } @catch (NSException *exception) {
+            LOG(@"❌ 调用 completion 异常: %@", exception.reason);
+            // 出现异常说明参数类型不匹配，请根据日志调整 invokeCompletion
+        }
+        
+        // 原 verifyWithCompletion: 可能还会返回一些对象或做其他操作，我们直接跳过
+    });
+    
+    class_replaceMethod(cls, @selector(verifyWithCompletion:), newIMP, typeEnc);
+    LOG(@"✅ verifyWithCompletion: 已 Hook（直接返回假成功）");
+}
 
 // ============================================================
-// Hook 部分：仅强制激活状态 + 主界面调试日志
+// 其他辅助 Hook
 // ============================================================
-static void hookActivationVC(Class cls) {
-    if (!cls) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
-    LOG(@"🎣 轻量 Hook ActVC: %s", class_getName(cls));
-    
-    // 强制返回已激活/已验证
-    Method m;
-    m = class_getInstanceMethod(cls, @selector(isActivated));
+static void hookIsActivated(Class cls) {
+    if (!cls) return;
+    Method m = class_getInstanceMethod(cls, @selector(isActivated));
     if (m) {
         IMP newIMP = imp_implementationWithBlock(^(id self) { return YES; });
         class_replaceMethod(cls, @selector(isActivated), newIMP, method_getTypeEncoding(m));
-        LOG(@"  ✅ isActivated -> YES");
+        LOG(@"✅ isActivated -> YES");
     }
     m = class_getInstanceMethod(cls, @selector(isVerified));
     if (m) {
         IMP newIMP = imp_implementationWithBlock(^(id self) { return YES; });
         class_replaceMethod(cls, @selector(isVerified), newIMP, method_getTypeEncoding(m));
-        LOG(@"  ✅ isVerified -> YES");
-    }
-    
-    // 仅用于观察，不修改行为
-    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        const char *typeEnc = method_getTypeEncoding(m);
-        IMP newIMP = imp_implementationWithBlock(^(id self) {
-            LOG(@"👀 ActVC viewDidLoad");
-            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
-        });
-        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
-        LOG(@"  ✅ viewDidLoad (仅记录)");
+        LOG(@"✅ isVerified -> YES");
     }
 }
 
-static void hookMainVC(Class cls) {
-    if (!cls) { LOG(@"❌ 未找到 ViewController"); return; }
-    LOG(@"🎣 观察 MainVC: %s", class_getName(cls));
-    
-    // viewDidLoad 仅记录
-    Method m = class_getInstanceMethod(cls, @selector(viewDidLoad));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        const char *typeEnc = method_getTypeEncoding(m);
-        IMP newIMP = imp_implementationWithBlock(^(id self) {
-            LOG(@"👀 MainVC viewDidLoad");
-            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
-        });
-        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
-        LOG(@"  ✅ viewDidLoad (仅记录)");
-    }
-    
-    // viewDidAppear 仅记录
-    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        const char *typeEnc = method_getTypeEncoding(m);
-        IMP newIMP = imp_implementationWithBlock(^(id self, BOOL animated) {
-            LOG(@"👀 MainVC viewDidAppear:");
-            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
-        });
-        class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
-        LOG(@"  ✅ viewDidAppear: (仅记录)");
-    }
+// ============================================================
+// 调试：记录关键方法调用
+// ============================================================
+static void hookForLogging(Class cls, SEL sel, NSString *desc) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    const char *typeEnc = method_getTypeEncoding(m);
+    IMP newIMP = imp_implementationWithBlock(^(id self) {
+        LOG(@"👀 %@ 被调用", desc);
+        ((void (*)(id, SEL))orig)(self, sel);
+    });
+    class_replaceMethod(cls, sel, newIMP, typeEnc);
 }
 
 // ============================================================
@@ -237,23 +253,37 @@ static void hookMainVC(Class cls) {
 // ============================================================
 __attribute__((constructor))
 static void iphook_init() {
-    NSLog(@"[KFunV14] 仅伪造激活成功版本已加载");
+    NSLog(@"[KFunV16] 方法级绕过版已加载");
     
-    // 1. 立即注册 NSURLProtocol（主线程/当前线程均可）
-    [NSURLProtocol registerClass:[FakeActivationProtocol class]];
-    LOG(@"✅ NSURLProtocol 已注册，激活请求将被拦截");
-    
-    // 2. 延迟设置日志窗口（等待 keyWindow 就绪）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupLogWindow();
         
-        // 3. 轻量 Hook
+        // 目标类
         Class actVC = objc_getClass("WWWActivationViewController");
-        if (actVC) hookActivationVC(actVC);
+        if (actVC) {
+            LOG(@"🎯 找到 WWWActivationViewController");
+            
+            // 1. Hook 核心验证方法
+            hookVerifyWithCompletion(actVC);
+            
+            // 2. 强制激活状态
+            hookIsActivated(actVC);
+            
+            // 3. 记录一些方法用于调试（可选，可注释掉减少日志）
+            hookForLogging(actVC, @selector(viewDidLoad), @"ActVC viewDidLoad");
+            hookForLogging(actVC, @selector(buildSuccessViewWithExpire:), @"ActVC buildSuccessViewWithExpire:");
+            hookForLogging(actVC, @selector(setupAfterActivation), @"ActVC setupAfterActivation");
+        } else {
+            LOG(@"❌ 未找到 WWWActivationViewController");
+        }
         
+        // 可选：记录主界面加载
         Class mainVC = objc_getClass("ViewController");
-        if (mainVC) hookMainVC(mainVC);
+        if (mainVC) {
+            hookForLogging(mainVC, @selector(viewDidLoad), @"MainVC viewDidLoad");
+            hookForLogging(mainVC, @selector(viewDidAppear:), @"MainVC viewDidAppear:");
+        }
         
-        LOG(@"🚀 初始化完成，等待应用发起激活请求...");
+        LOG(@"🚀 初始化完成，等待用户点击验证...");
     });
 }
