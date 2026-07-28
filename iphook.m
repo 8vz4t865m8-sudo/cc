@@ -2,17 +2,10 @@
 //  kfunTweak.m
 //  一键复制保存为 kfunTweak.m
 //
-//  Theos 编译步骤：
-//    1. 新建目录: mkdir kfuntweak && cd kfuntweak
-//    2. 创建文件: touch Makefile control kfunTweak.m
-//    3. Makefile 内容见本文件底部注释
-//    4. 将下方代码粘贴到 kfunTweak.m
-//    5. 执行: make package
-//
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <WebKit/WebKit.h>
+#import <WebKit/WebKit>
 
 #pragma mark - 日志系统
 
@@ -42,6 +35,27 @@ static void KFLog(NSString *fmt, ...) {
     });
 }
 
+#pragma mark - 辅助：获取所有 Window（兼容 iOS 15+）
+
+static NSArray<UIWindow *> *KFAllWindows(void) {
+    NSMutableArray<UIWindow *> *arr = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                [arr addObjectsFromArray:ws.windows];
+            }
+        }
+    }
+    if (arr.count == 0) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [arr addObjectsFromArray:[UIApplication sharedApplication].windows];
+#pragma clang diagnostic pop
+    }
+    return arr;
+}
+
 #pragma mark - 悬浮窗面板
 
 @interface KFDebugPanel : UIView
@@ -68,7 +82,6 @@ static void KFLog(NSString *fmt, ...) {
         self.isExpanded = NO;
         self.backgroundColor = [UIColor clearColor];
         
-        // 悬浮按钮
         self.floatBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         self.floatBtn.frame = CGRectMake(0, 0, 60, 60);
         self.floatBtn.backgroundColor = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:0.95];
@@ -85,7 +98,6 @@ static void KFLog(NSString *fmt, ...) {
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
         [self.floatBtn addGestureRecognizer:pan];
         
-        // 内容面板
         self.contentView = [[UIView alloc] initWithFrame:CGRectMake(-245, 70, 310, 420)];
         self.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.06 blue:0.08 alpha:0.96];
         self.contentView.layer.cornerRadius = 16;
@@ -95,14 +107,12 @@ static void KFLog(NSString *fmt, ...) {
         self.contentView.alpha = 0;
         [self addSubview:self.contentView];
         
-        // 标题
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, 220, 24)];
         title.text = @"KFun Radar Debug";
         title.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:1.0 alpha:1.0];
         title.font = [UIFont boldSystemFontOfSize:15];
         [self.contentView addSubview:title];
         
-        // 关闭
         UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
         close.frame = CGRectMake(270, 8, 32, 32);
         [close setTitle:@"✕" forState:UIControlStateNormal];
@@ -111,7 +121,6 @@ static void KFLog(NSString *fmt, ...) {
         [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
         [self.contentView addSubview:close];
         
-        // 快捷按钮区
         NSArray *btns = @[
             @{@"title":@"🗑 移除遮罩", @"sel":@"btnRemoveMask:"},
             @{@"title":@"🌐 查看WebView", @"sel":@"btnInspect:"},
@@ -129,7 +138,6 @@ static void KFLog(NSString *fmt, ...) {
             [self.contentView addSubview:b];
         }
         
-        // 日志视图
         gLogView = [[UITextView alloc] initWithFrame:CGRectMake(8, 78, 294, 334)];
         gLogView.backgroundColor = [UIColor clearColor];
         gLogView.textColor = [UIColor colorWithRed:0.3 green:1.0 blue:0.3 alpha:1.0];
@@ -141,23 +149,17 @@ static void KFLog(NSString *fmt, ...) {
     return self;
 }
 
-- (void)toggle {
-    self.isExpanded ? [self hide] : [self show];
-}
-
+- (void)toggle { self.isExpanded ? [self hide] : [self show]; }
 - (void)show {
     self.isExpanded = YES;
     self.contentView.hidden = NO;
     [UIView animateWithDuration:0.2 animations:^{ self.contentView.alpha = 1.0; }];
 }
-
 - (void)hide {
     self.isExpanded = NO;
-    [UIView animateWithDuration:0.2 animations:^{
-        self.contentView.alpha = 0.0;
-    } completion:^(BOOL f){ self.contentView.hidden = YES; }];
+    [UIView animateWithDuration:0.2 animations:^{ self.contentView.alpha = 0.0; }
+                    completion:^(BOOL f){ self.contentView.hidden = YES; }];
 }
-
 - (void)drag:(UIPanGestureRecognizer *)pan {
     CGPoint t = [pan translationInView:self.superview];
     CGRect f = self.frame;
@@ -177,7 +179,6 @@ static void KFLog(NSString *fmt, ...) {
 static void ScanMaskInView(UIView *view, int depth) {
     if (depth > 25) return;
     
-    // 策略1: 全屏半透明 + 包含 UITextField = 验证遮罩
     CGRect vf = view.frame;
     if (vf.size.width > 320 && vf.size.height > 500) {
         BOOL hasText = NO;
@@ -196,7 +197,6 @@ static void ScanMaskInView(UIView *view, int depth) {
         }
     }
     
-    // 策略2: 通过 KVC 检查 authMaskView 属性
     if ([view respondsToSelector:@selector(authMaskView)]) {
         UIView *mask = nil;
         @try { mask = [view performSelector:@selector(authMaskView)]; } @catch (id e) {}
@@ -206,26 +206,18 @@ static void ScanMaskInView(UIView *view, int depth) {
         }
     }
     
-    // 递归
     NSArray *subs = [view.subviews copy];
     for (UIView *sv in subs) ScanMaskInView(sv, depth + 1);
 }
 
 void RemoveAllAuthMasks(void) {
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+    for (UIWindow *win in KFAllWindows()) {
         ScanMaskInView(win, 0);
     }
 }
 
 #pragma mark - WebView 检查
 
-void InspectWebViews(void) {
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
-        [self inspectView:win depth:0];
-    }
-}
-
-// 需要声明为 C 函数，但内部用 ObjC，这里用内联辅助
 static void _inspect(UIView *v, int d) {
     if (d > 20) return;
     NSString *cls = NSStringFromClass([v class]);
@@ -240,7 +232,7 @@ static void _inspect(UIView *v, int d) {
 }
 
 void InspectWebViews(void) {
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+    for (UIWindow *win in KFAllWindows()) {
         _inspect(win, 0);
     }
 }
@@ -257,20 +249,20 @@ static void hook_vcAppear(id self, SEL _cmd, BOOL animated) {
 }
 
 static id (*orig_wkLoadReq)(id, SEL, id);
-static id hook_wkLoadReq(id self, SEL _cmd, NSURLRequest *req) {
-    KFLog(@"🌐 loadRequest: %@", req.URL.absoluteString);
+static id hook_wkLoadReq(id self, SEL _cmd, id req) {
+    KFLog(@"🌐 loadRequest: %@", [(NSURLRequest *)req URL].absoluteString);
     return orig_wkLoadReq(self, _cmd, req);
 }
 
 static id (*orig_wkLoadFile)(id, SEL, id, id);
-static id hook_wkLoadFile(id self, SEL _cmd, NSURL *url, NSURL *base) {
+static id hook_wkLoadFile(id self, SEL _cmd, id url, id base) {
     KFLog(@"📄 loadFileURL: %@", url);
     return orig_wkLoadFile(self, _cmd, url, base);
 }
 
 static id (*orig_wkLoadHTML)(id, SEL, id, id);
-static id hook_wkLoadHTML(id self, SEL _cmd, NSString *str, NSURL *base) {
-    KFLog(@"📝 loadHTMLString len=%lu", (unsigned long)str.length);
+static id hook_wkLoadHTML(id self, SEL _cmd, id str, id base) {
+    KFLog(@"📝 loadHTMLString len=%lu", (unsigned long)[(NSString *)str length]);
     return orig_wkLoadHTML(self, _cmd, str, base);
 }
 
@@ -281,8 +273,21 @@ static void kfun_tweak_init() {
     KFLog(@"🚀 KFun Tweak 已注入");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+        UIWindow *kw = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    kw = [(UIWindowScene *)scene windows].firstObject;
+                    break;
+                }
+            }
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if (!kw) kw = [UIApplication sharedApplication].keyWindow;
         if (!kw) kw = [[UIApplication sharedApplication].windows firstObject];
+#pragma clang diagnostic pop
+        
         if (kw) {
             KFDebugPanel *p = [KFDebugPanel shared];
             [kw addSubview:p];
@@ -291,73 +296,23 @@ static void kfun_tweak_init() {
         RemoveAllAuthMasks();
     });
     
-    // 定时扫描遮罩
     [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:YES block:^(NSTimer *t) {
         RemoveAllAuthMasks();
     }];
     
-    // Swizzle UIViewController viewDidAppear:
     Method m1 = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
     if (m1) {
         orig_vcAppear = (void (*)(id, SEL, BOOL))method_getImplementation(m1);
         method_setImplementation(m1, (IMP)hook_vcAppear);
     }
     
-    // Swizzle WKWebView
     Class wk = NSClassFromString(@"WKWebView");
     if (wk) {
         Method m2 = class_getInstanceMethod(wk, @selector(loadRequest:));
-        if (m2) {
-            orig_wkLoadReq = (id (*)(id, SEL, id))method_getImplementation(m2);
-            method_setImplementation(m2, (IMP)hook_wkLoadReq);
-        }
+        if (m2) { orig_wkLoadReq = (id (*)(id, SEL, id))method_getImplementation(m2); method_setImplementation(m2, (IMP)hook_wkLoadReq); }
         Method m3 = class_getInstanceMethod(wk, @selector(loadFileURL:allowingReadAccessToURL:));
-        if (m3) {
-            orig_wkLoadFile = (id (*)(id, SEL, id, id))method_getImplementation(m3);
-            method_setImplementation(m3, (IMP)hook_wkLoadFile);
-        }
+        if (m3) { orig_wkLoadFile = (id (*)(id, SEL, id, id))method_getImplementation(m3); method_setImplementation(m3, (IMP)hook_wkLoadFile); }
         Method m4 = class_getInstanceMethod(wk, @selector(loadHTMLString:baseURL:));
-        if (m4) {
-            orig_wkLoadHTML = (id (*)(id, SEL, id, id))method_getImplementation(m4);
-            method_setImplementation(m4, (IMP)hook_wkLoadHTML);
-        }
+        if (m4) { orig_wkLoadHTML = (id (*)(id, SEL, id, id))method_getImplementation(m4); method_setImplementation(m4, (IMP)hook_wkLoadHTML); }
     }
 }
-
-/*
-================================================================================
-Theos Makefile (保存为 Makefile):
-================================================================================
-TARGET := iphone:clang:latest:15.0
-ARCHS := arm64
-
-include $(THEOS)/makefiles/common.mk
-
-TWEAK_NAME = kfunTweak
-
-kfunTweak_FILES = kfunTweak.m
-kfunTweak_CFLAGS = -fobjc-arc
-kfunTweak_FRAMEWORKS = UIKit WebKit
-
-include $(THEOS_MAKE_PATH)/tweak.mk
-
-================================================================================
-Theos control 文件 (保存为 control):
-================================================================================
-Package: com.yourname.kfuntweak
-Name: KFun Tweak
-Version: 1.0.0
-Architecture: iphoneos-arm
-Description: KFun Radar debug & auth bypass
-Maintainer: You
-Author: You
-Section: Tweaks
-Depends: mobilesubstrate
-
-================================================================================
-编译命令:
-    make package
-安装命令:
-    dpkg -i com.yourname.kfuntweak_1.0.0_iphoneos-arm.deb
-================================================================================
-*/
