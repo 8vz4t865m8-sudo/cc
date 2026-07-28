@@ -1,6 +1,7 @@
 //
-//  iphook.m - KFun Bypass v20
-//  修复：用 NSInvocation 安全传递 block，防闪退
+//  iphook.m - KFun Bypass v22
+//  修复：Block_copy 复制 block + NSInvocation 安全传递，防闪退
+//  策略：自然版（onTapVerify 不拦截，showError: 改为成功）
 //
 
 #import <UIKit/UIKit.h>
@@ -15,7 +16,7 @@ static NSMutableString *g_logBuffer = nil;
 
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV20] %@", line);
+    NSLog(@"[KFunV22] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
     if (g_logBuffer.length > 15000) {
@@ -79,7 +80,7 @@ static void setupWindow(void) {
         [g_logContainer addSubview:bar];
         
         UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 20)];
-        t.text = @"🔍 KFun v20 NSInvocation (拖动)";
+        t.text = @"🔍 KFun v22 BlockCopy (拖动)";
         t.textColor = [UIColor cyanColor];
         t.font = [UIFont boldSystemFontOfSize:10];
         [bar addSubview:t];
@@ -104,13 +105,13 @@ static void setupWindow(void) {
         [bar addGestureRecognizer:pan];
         
         [kw addSubview:g_logContainer];
-        LOG(@"✅ v20 悬浮窗启动");
+        LOG(@"✅ v22 悬浮窗启动");
     });
 }
 
 // ============================================================
 // 🌿 自然 bypass：只把 showError: 改成 showSuccess:completion:
-// 用 NSInvocation 安全传递 block
+// 核心修复：Block_copy + NSInvocation 安全传递 block
 // ============================================================
 static void naturalBypass(id vcInstance) {
     LOG(@"🌿 自然 bypass 触发");
@@ -150,7 +151,7 @@ static void naturalBypass(id vcInstance) {
         LOG(@"⚠️ 获取 onVerify 失败: %@", e.reason);
     }
     
-    // 5. ⭐ 用 NSInvocation 安全调用 showSuccess:completion:
+    // 5. ⭐ 用 NSInvocation + Block_copy 安全调用 showSuccess:completion:
     @try {
         SEL sel = @selector(showSuccess:completion:);
         if ([vcInstance respondsToSelector:sel]) {
@@ -164,14 +165,16 @@ static void naturalBypass(id vcInstance) {
                 NSString *expire = @"到期时间:2099-12-31 23:59:59";
                 [inv setArgument:&expire atIndex:2];
                 
-                // 参数2: completion block（取地址传递）
+                // 参数2: completion block
+                // ⭐ 关键：Block_copy 复制到堆上，防止栈 block 被释放
                 if (completion) {
-                    [inv setArgument:&completion atIndex:3];
-                    LOG(@"✅ NSInvocation 设置 completion");
+                    id heapBlock = Block_copy(completion);
+                    [inv setArgument:&heapBlock atIndex:3];
+                    LOG(@"✅ Block_copy completion -> 堆 block: %@", heapBlock);
                 } else {
                     id nilBlock = nil;
                     [inv setArgument:&nilBlock atIndex:3];
-                    LOG(@"✅ NSInvocation 设置 nil completion");
+                    LOG(@"✅ 设置 nil completion");
                 }
                 
                 [inv invoke];
@@ -182,13 +185,6 @@ static void naturalBypass(id vcInstance) {
         }
     } @catch (NSException *e) {
         LOG(@"❌ NSInvocation 调用失败: %@", e.reason);
-        // 备用：用 performSelector 传 nil（不传递 block）
-        @try {
-            [vcInstance performSelector:@selector(showSuccess:completion:) withObject:@"到期时间:2099-12-31 23:59:59" withObject:nil];
-            LOG(@"✅ 备用调用成功（nil completion）");
-        } @catch (NSException *e2) {
-            LOG(@"❌ 备用调用也失败: %@", e2.reason);
-        }
     }
     
     // 6. 备用：如果 showSuccess 没触发 dismiss，3秒后手动 dismiss
@@ -212,7 +208,7 @@ static void naturalBypass(id vcInstance) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV20] v20 NSInvocation版已加载");
+    NSLog(@"[KFunV22] v22 BlockCopy版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -273,7 +269,7 @@ static void iphook_init() {
             LOG(@"✅ isVerified -> YES");
         }
         
-        LOG(@"🚀 v20 初始化完成");
+        LOG(@"🚀 v22 初始化完成");
         LOG(@"📋 输入任意15位卡密 → 点验证 → 等3秒看结果");
     });
 }
