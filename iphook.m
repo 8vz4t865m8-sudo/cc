@@ -1,12 +1,11 @@
 //
-//  iphook.m - KFun Bypass v22
-//  修复：Block_copy 复制 block + NSInvocation 安全传递，防闪退
+//  iphook.m - KFun Bypass v22 (ARC 编译修复)
+//  修复：使用 [completion copy] 替代 Block_copy，安全传递 block
 //  策略：自然版（onTapVerify 不拦截，showError: 改为成功）
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 
 #define LOG(fmt, ...) logLine([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
@@ -80,7 +79,7 @@ static void setupWindow(void) {
         [g_logContainer addSubview:bar];
         
         UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 20)];
-        t.text = @"🔍 KFun v22 BlockCopy (拖动)";
+        t.text = @"🔍 KFun v22 ARC修复 (拖动)";
         t.textColor = [UIColor cyanColor];
         t.font = [UIFont boldSystemFontOfSize:10];
         [bar addSubview:t];
@@ -105,13 +104,13 @@ static void setupWindow(void) {
         [bar addGestureRecognizer:pan];
         
         [kw addSubview:g_logContainer];
-        LOG(@"✅ v22 悬浮窗启动");
+        LOG(@"✅ v22 ARC修复 悬浮窗启动");
     });
 }
 
 // ============================================================
 // 🌿 自然 bypass：只把 showError: 改成 showSuccess:completion:
-// 核心修复：Block_copy + NSInvocation 安全传递 block
+// 核心修复：[completion copy] 安全复制 block，ARC 下无桥接问题
 // ============================================================
 static void naturalBypass(id vcInstance) {
     LOG(@"🌿 自然 bypass 触发");
@@ -151,7 +150,7 @@ static void naturalBypass(id vcInstance) {
         LOG(@"⚠️ 获取 onVerify 失败: %@", e.reason);
     }
     
-    // 5. ⭐ 用 NSInvocation + Block_copy 安全调用 showSuccess:completion:
+    // 5. ⭐ 用 NSInvocation 安全调用 showSuccess:completion:
     @try {
         SEL sel = @selector(showSuccess:completion:);
         if ([vcInstance respondsToSelector:sel]) {
@@ -166,16 +165,15 @@ static void naturalBypass(id vcInstance) {
                 [inv setArgument:&expire atIndex:2];
                 
                 // 参数2: completion block
-                // ⭐ 关键：Block_copy 复制到堆上，防止栈 block 被释放
+                // ⭐ 关键：使用 [completion copy] 代替 Block_copy，ARC 安全，且保证堆 block
+                id heapBlock = nil;
                 if (completion) {
-                    id heapBlock = Block_copy(completion);
-                    [inv setArgument:&heapBlock atIndex:3];
-                    LOG(@"✅ Block_copy completion -> 堆 block: %@", heapBlock);
+                    heapBlock = [completion copy];
+                    LOG(@"✅ 复制 completion -> 堆 block: %@", heapBlock);
                 } else {
-                    id nilBlock = nil;
-                    [inv setArgument:&nilBlock atIndex:3];
                     LOG(@"✅ 设置 nil completion");
                 }
+                [inv setArgument:&heapBlock atIndex:3];
                 
                 [inv invoke];
                 LOG(@"✅ showSuccess:completion: 调用成功");
@@ -208,7 +206,7 @@ static void naturalBypass(id vcInstance) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV22] v22 BlockCopy版已加载");
+    NSLog(@"[KFunV22] v22 ARC修复版已加载");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -269,7 +267,7 @@ static void iphook_init() {
             LOG(@"✅ isVerified -> YES");
         }
         
-        LOG(@"🚀 v22 初始化完成");
+        LOG(@"🚀 v22 ARC修复版 初始化完成");
         LOG(@"📋 输入任意15位卡密 → 点验证 → 等3秒看结果");
     });
 }
