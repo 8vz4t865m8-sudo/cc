@@ -1,273 +1,363 @@
 //
-//  iphook.m - KFun Bypass v22 (ARC 编译修复)
-//  修复：使用 [completion copy] 替代 Block_copy，安全传递 block
-//  策略：自然版（onTapVerify 不拦截，showError: 改为成功）
+//  kfunTweak.m
+//  一键复制保存为 kfunTweak.m
+//
+//  Theos 编译步骤：
+//    1. 新建目录: mkdir kfuntweak && cd kfuntweak
+//    2. 创建文件: touch Makefile control kfunTweak.m
+//    3. Makefile 内容见本文件底部注释
+//    4. 将下方代码粘贴到 kfunTweak.m
+//    5. 执行: make package
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <WebKit/WebKit.h>
 
-#define LOG(fmt, ...) logLine([NSString stringWithFormat:fmt, ##__VA_ARGS__])
+#pragma mark - 日志系统
 
-static UITextView *g_logView = nil;
-static UIView *g_logContainer = nil;
-static NSMutableString *g_logBuffer = nil;
+static UITextView *gLogView = nil;
 
-static void logLine(NSString *msg) {
-    NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV22] %@", line);
-    if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
-    [g_logBuffer appendFormat:@"%@\n", line];
-    if (g_logBuffer.length > 15000) {
-        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 15000)];
-    }
+static void KFLog(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    
+    NSString *ts = [NSDateFormatter localizedStringFromDate:[NSDate date]
+                                                  dateStyle:NSDateFormatterNoStyle
+                                                  timeStyle:NSDateFormatterMediumStyle];
+    NSString *line = [NSString stringWithFormat:@"[%@] %@", ts, msg];
+    NSLog(@"[KFunTweak] %@", line);
+    
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_logView) {
-            g_logView.text = g_logBuffer;
-            [g_logView scrollRangeToVisible:NSMakeRange(g_logBuffer.length - 1, 1)];
+        if (gLogView) {
+            NSString *txt = gLogView.text ?: @"";
+            NSString *up = [NSString stringWithFormat:@"%@\n%@", line, txt];
+            if (up.length > 8000) up = [up substringToIndex:8000];
+            gLogView.text = up;
+            NSRange b = NSMakeRange(gLogView.text.length - 1, 1);
+            [gLogView scrollRangeToVisible:b];
         }
     });
 }
 
-@interface DragHandler : NSObject
+#pragma mark - 悬浮窗面板
+
+@interface KFDebugPanel : UIView
+@property (nonatomic, strong) UIButton *floatBtn;
+@property (nonatomic, strong) UIView *contentView;
+@property (nonatomic, assign) BOOL isExpanded;
 @end
-@implementation DragHandler
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *v = pan.view.superview;
-    CGPoint t = [pan translationInView:v.superview];
-    v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
-    [pan setTranslation:CGPointZero inView:v.superview];
+
+@implementation KFDebugPanel
+
++ (instancetype)shared {
+    static KFDebugPanel *p = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+        p = [[self alloc] initWithFrame:CGRectMake(sw - 75, 140, 60, 60)];
+    });
+    return p;
 }
-- (void)copyLog:(id)sender {
-    if (g_logBuffer.length) {
-        UIPasteboard.generalPasteboard.string = g_logBuffer;
-        LOG(@"📋 已复制 (%lu 字符)", (unsigned long)g_logBuffer.length);
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.isExpanded = NO;
+        self.backgroundColor = [UIColor clearColor];
+        
+        // 悬浮按钮
+        self.floatBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        self.floatBtn.frame = CGRectMake(0, 0, 60, 60);
+        self.floatBtn.backgroundColor = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:0.95];
+        self.floatBtn.layer.cornerRadius = 30;
+        self.floatBtn.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.floatBtn.layer.shadowOffset = CGSizeMake(0, 3);
+        self.floatBtn.layer.shadowRadius = 8;
+        self.floatBtn.layer.shadowOpacity = 0.35;
+        [self.floatBtn setTitle:@"🔥" forState:UIControlStateNormal];
+        self.floatBtn.titleLabel.font = [UIFont systemFontOfSize:26];
+        [self.floatBtn addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:self.floatBtn];
+        
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
+        [self.floatBtn addGestureRecognizer:pan];
+        
+        // 内容面板
+        self.contentView = [[UIView alloc] initWithFrame:CGRectMake(-245, 70, 310, 420)];
+        self.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.06 blue:0.08 alpha:0.96];
+        self.contentView.layer.cornerRadius = 16;
+        self.contentView.layer.borderWidth = 1.5;
+        self.contentView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:1.0].CGColor;
+        self.contentView.hidden = YES;
+        self.contentView.alpha = 0;
+        [self addSubview:self.contentView];
+        
+        // 标题
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, 220, 24)];
+        title.text = @"KFun Radar Debug";
+        title.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:1.0 alpha:1.0];
+        title.font = [UIFont boldSystemFontOfSize:15];
+        [self.contentView addSubview:title];
+        
+        // 关闭
+        UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+        close.frame = CGRectMake(270, 8, 32, 32);
+        [close setTitle:@"✕" forState:UIControlStateNormal];
+        close.titleLabel.font = [UIFont systemFontOfSize:20];
+        [close setTitleColor:[UIColor redColor] forState:UIControlStateNormal];
+        [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
+        [self.contentView addSubview:close];
+        
+        // 快捷按钮区
+        NSArray *btns = @[
+            @{@"title":@"🗑 移除遮罩", @"sel":@"btnRemoveMask:"},
+            @{@"title":@"🌐 查看WebView", @"sel":@"btnInspect:"},
+            @{@"title":@"📝 清空日志", @"sel":@"btnClear:"}
+        ];
+        for (int i = 0; i < btns.count; i++) {
+            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+            b.frame = CGRectMake(10 + i * 100, 40, 95, 30);
+            b.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
+            b.layer.cornerRadius = 6;
+            [b setTitle:btns[i][@"title"] forState:UIControlStateNormal];
+            b.titleLabel.font = [UIFont systemFontOfSize:11];
+            [b setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
+            [b addTarget:self action:NSSelectorFromString(btns[i][@"sel"]) forControlEvents:UIControlEventTouchUpInside];
+            [self.contentView addSubview:b];
+        }
+        
+        // 日志视图
+        gLogView = [[UITextView alloc] initWithFrame:CGRectMake(8, 78, 294, 334)];
+        gLogView.backgroundColor = [UIColor clearColor];
+        gLogView.textColor = [UIColor colorWithRed:0.3 green:1.0 blue:0.3 alpha:1.0];
+        gLogView.font = [UIFont fontWithName:@"Menlo" size:10];
+        gLogView.editable = NO;
+        gLogView.selectable = YES;
+        [self.contentView addSubview:gLogView];
     }
+    return self;
 }
+
+- (void)toggle {
+    self.isExpanded ? [self hide] : [self show];
+}
+
+- (void)show {
+    self.isExpanded = YES;
+    self.contentView.hidden = NO;
+    [UIView animateWithDuration:0.2 animations:^{ self.contentView.alpha = 1.0; }];
+}
+
+- (void)hide {
+    self.isExpanded = NO;
+    [UIView animateWithDuration:0.2 animations:^{
+        self.contentView.alpha = 0.0;
+    } completion:^(BOOL f){ self.contentView.hidden = YES; }];
+}
+
+- (void)drag:(UIPanGestureRecognizer *)pan {
+    CGPoint t = [pan translationInView:self.superview];
+    CGRect f = self.frame;
+    f.origin.x += t.x; f.origin.y += t.y;
+    self.frame = f;
+    [pan setTranslation:CGPointZero inView:self.superview];
+}
+
+- (void)btnRemoveMask:(id)sender { extern void RemoveAllAuthMasks(void); RemoveAllAuthMasks(); }
+- (void)btnInspect:(id)sender   { extern void InspectWebViews(void); InspectWebViews(); }
+- (void)btnClear:(id)sender      { gLogView.text = @""; }
+
 @end
-static DragHandler *g_drag = nil;
 
-static void setupWindow(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        DragHandler *dh = [[DragHandler alloc] init];
-        g_drag = dh;
-        UIWindow *kw = nil;
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-                if ([s isKindOfClass:[UIWindowScene class]] && ((UIWindowScene *)s).activationState == UISceneActivationStateForegroundActive) {
-                    if (((UIWindowScene *)s).windows.count) { kw = ((UIWindowScene *)s).windows.firstObject; break; }
+#pragma mark - 遮罩移除引擎
+
+static void ScanMaskInView(UIView *view, int depth) {
+    if (depth > 25) return;
+    
+    // 策略1: 全屏半透明 + 包含 UITextField = 验证遮罩
+    CGRect vf = view.frame;
+    if (vf.size.width > 320 && vf.size.height > 500) {
+        BOOL hasText = NO;
+        for (UIView *sv in view.subviews) {
+            if ([sv isKindOfClass:[UITextField class]] || [sv isKindOfClass:[UIButton class]]) {
+                NSString *t = [(UIButton *)sv currentTitle] ?: @"";
+                if ([t containsString:@"验证"] || [t containsString:@"激活"] || [t containsString:@"登录"] || [t containsString:@"确认"]) {
+                    hasText = YES; break;
                 }
             }
         }
-        if (!kw) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            kw = [UIApplication sharedApplication].keyWindow ?: [UIApplication sharedApplication].windows.firstObject;
-            #pragma clang diagnostic pop
+        if (hasText && view.alpha <= 0.95) {
+            [view removeFromSuperview];
+            KFLog(@"🗑 移除验证遮罩 (策略1)");
+            return;
         }
-        if (!kw) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupWindow(); }); return; }
-        
-        CGFloat w = 350, h = 280;
-        g_logContainer = [[UIView alloc] initWithFrame:CGRectMake(8, 100, w, h)];
-        g_logContainer.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.93];
-        g_logContainer.layer.cornerRadius = 10;
-        g_logContainer.layer.borderColor = [UIColor cyanColor].CGColor;
-        g_logContainer.layer.borderWidth = 1.2;
-        
-        UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 26)];
-        bar.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-        [g_logContainer addSubview:bar];
-        
-        UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 20)];
-        t.text = @"🔍 KFun v22 ARC修复 (拖动)";
-        t.textColor = [UIColor cyanColor];
-        t.font = [UIFont boldSystemFontOfSize:10];
-        [bar addSubview:t];
-        
-        UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        copyBtn.frame = CGRectMake(w-70, 2, 65, 22);
-        [copyBtn setTitle:@"📋复制" forState:UIControlStateNormal];
-        copyBtn.titleLabel.font = [UIFont systemFontOfSize:9];
-        [copyBtn setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
-        [copyBtn addTarget:dh action:@selector(copyLog:) forControlEvents:UIControlEventTouchUpInside];
-        [bar addSubview:copyBtn];
-        
-        g_logView = [[UITextView alloc] initWithFrame:CGRectMake(2, 28, w-4, h-30)];
-        g_logView.textColor = [UIColor greenColor];
-        g_logView.font = [UIFont fontWithName:@"Menlo" size:8];
-        g_logView.backgroundColor = [UIColor clearColor];
-        g_logView.editable = NO;
-        g_logView.selectable = YES;
-        [g_logContainer addSubview:g_logView];
-        
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:dh action:@selector(handlePan:)];
-        [bar addGestureRecognizer:pan];
-        
-        [kw addSubview:g_logContainer];
-        LOG(@"✅ v22 ARC修复 悬浮窗启动");
+    }
+    
+    // 策略2: 通过 KVC 检查 authMaskView 属性
+    if ([view respondsToSelector:@selector(authMaskView)]) {
+        UIView *mask = nil;
+        @try { mask = [view performSelector:@selector(authMaskView)]; } @catch (id e) {}
+        if (mask && mask.superview) {
+            [mask removeFromSuperview];
+            KFLog(@"🗑 KVC 移除 authMaskView");
+        }
+    }
+    
+    // 递归
+    NSArray *subs = [view.subviews copy];
+    for (UIView *sv in subs) ScanMaskInView(sv, depth + 1);
+}
+
+void RemoveAllAuthMasks(void) {
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        ScanMaskInView(win, 0);
+    }
+}
+
+#pragma mark - WebView 检查
+
+void InspectWebViews(void) {
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        [self inspectView:win depth:0];
+    }
+}
+
+// 需要声明为 C 函数，但内部用 ObjC，这里用内联辅助
+static void _inspect(UIView *v, int d) {
+    if (d > 20) return;
+    NSString *cls = NSStringFromClass([v class]);
+    if ([cls isEqualToString:@"WKWebView"] || [cls isEqualToString:@"UIWebView"]) {
+        NSURL *url = nil;
+        if ([v respondsToSelector:@selector(URL)]) {
+            url = [v performSelector:@selector(URL)];
+        }
+        KFLog(@"🌐 发现 %@ URL=%@", cls, url);
+    }
+    for (UIView *sv in v.subviews) _inspect(sv, d + 1);
+}
+
+void InspectWebViews(void) {
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        _inspect(win, 0);
+    }
+}
+
+#pragma mark - Method Swizzling
+
+static void (*orig_vcAppear)(id, SEL, BOOL);
+static void hook_vcAppear(id self, SEL _cmd, BOOL animated) {
+    orig_vcAppear(self, _cmd, animated);
+    KFLog(@"📱 VC: %@", NSStringFromClass([self class]));
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        RemoveAllAuthMasks();
     });
 }
 
-// ============================================================
-// 🌿 自然 bypass：只把 showError: 改成 showSuccess:completion:
-// 核心修复：[completion copy] 安全复制 block，ARC 下无桥接问题
-// ============================================================
-static void naturalBypass(id vcInstance) {
-    LOG(@"🌿 自然 bypass 触发");
-    
-    // 1. 停止 spinner
-    @try {
-        id spinner = [vcInstance valueForKey:@"spinner"];
-        if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
-            [(UIActivityIndicatorView *)spinner stopAnimating];
-            [(UIActivityIndicatorView *)spinner setHidden:YES];
-        }
-    } @catch (NSException *e) {}
-    
-    // 2. 隐藏错误提示
-    @try {
-        id errorLabel = [vcInstance valueForKey:@"errorLabel"];
-        if (errorLabel && [errorLabel isKindOfClass:[UIView class]]) {
-            [(UIView *)errorLabel setHidden:YES];
-        }
-    } @catch (NSException *e) {}
-    
-    // 3. 移除遮罩
-    @try {
-        id mask = [vcInstance valueForKey:@"authMaskView"];
-        if (mask && [mask isKindOfClass:[UIView class]]) {
-            [(UIView *)mask setHidden:YES];
-            [(UIView *)mask removeFromSuperview];
-        }
-    } @catch (NSException *e) {}
-    
-    // 4. 获取 onVerify block（App 自己的 completion）
-    id completion = nil;
-    @try {
-        completion = [vcInstance valueForKey:@"onVerify"];
-        LOG(@"🌿 onVerify = %@ (类型: %@)", completion, completion ? NSStringFromClass([completion class]) : @"nil");
-    } @catch (NSException *e) {
-        LOG(@"⚠️ 获取 onVerify 失败: %@", e.reason);
-    }
-    
-    // 5. ⭐ 用 NSInvocation 安全调用 showSuccess:completion:
-    @try {
-        SEL sel = @selector(showSuccess:completion:);
-        if ([vcInstance respondsToSelector:sel]) {
-            NSMethodSignature *sig = [vcInstance methodSignatureForSelector:sel];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setTarget:vcInstance];
-                [inv setSelector:sel];
-                
-                // 参数1: expire 字符串
-                NSString *expire = @"到期时间:2099-12-31 23:59:59";
-                [inv setArgument:&expire atIndex:2];
-                
-                // 参数2: completion block
-                // ⭐ 关键：使用 [completion copy] 代替 Block_copy，ARC 安全，且保证堆 block
-                id heapBlock = nil;
-                if (completion) {
-                    heapBlock = [completion copy];
-                    LOG(@"✅ 复制 completion -> 堆 block: %@", heapBlock);
-                } else {
-                    LOG(@"✅ 设置 nil completion");
-                }
-                [inv setArgument:&heapBlock atIndex:3];
-                
-                [inv invoke];
-                LOG(@"✅ showSuccess:completion: 调用成功");
-            }
-        } else {
-            LOG(@"❌ ActVC 没有 showSuccess:completion:");
-        }
-    } @catch (NSException *e) {
-        LOG(@"❌ NSInvocation 调用失败: %@", e.reason);
-    }
-    
-    // 6. 备用：如果 showSuccess 没触发 dismiss，3秒后手动 dismiss
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        @try {
-            if ([vcInstance isKindOfClass:[UIViewController class]]) {
-                UIViewController *vc = (UIViewController *)vcInstance;
-                if (vc.presentingViewController) {
-                    [vc dismissViewControllerAnimated:NO completion:^{
-                        LOG(@"✅ 备用 dismiss 完成");
-                    }];
-                }
-            }
-        } @catch (NSException *e) {}
-    });
+static id (*orig_wkLoadReq)(id, SEL, id);
+static id hook_wkLoadReq(id self, SEL _cmd, NSURLRequest *req) {
+    KFLog(@"🌐 loadRequest: %@", req.URL.absoluteString);
+    return orig_wkLoadReq(self, _cmd, req);
 }
 
-// ============================================================
-// Hook 入口
-// ============================================================
+static id (*orig_wkLoadFile)(id, SEL, id, id);
+static id hook_wkLoadFile(id self, SEL _cmd, NSURL *url, NSURL *base) {
+    KFLog(@"📄 loadFileURL: %@", url);
+    return orig_wkLoadFile(self, _cmd, url, base);
+}
+
+static id (*orig_wkLoadHTML)(id, SEL, id, id);
+static id hook_wkLoadHTML(id self, SEL _cmd, NSString *str, NSURL *base) {
+    KFLog(@"📝 loadHTMLString len=%lu", (unsigned long)str.length);
+    return orig_wkLoadHTML(self, _cmd, str, base);
+}
+
+#pragma mark - Constructor
+
 __attribute__((constructor))
-static void iphook_init() {
-    NSLog(@"========================================");
-    NSLog(@"[KFunV22] v22 ARC修复版已加载");
-    NSLog(@"========================================");
+static void kfun_tweak_init() {
+    KFLog(@"🚀 KFun Tweak 已注入");
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        setupWindow();
-        
-        Class actVC = objc_getClass("WWWActivationViewController");
-        if (!actVC) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
-        
-        // 1. onTapVerify：只记录，不拦截
-        Method m = class_getInstanceMethod(actVC, @selector(onTapVerify));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            const char *te = method_getTypeEncoding(m);
-            IMP newIMP = imp_implementationWithBlock(^(id self) {
-                LOG(@"🎯 [ActVC] onTapVerify 开始（不拦截）");
-                id onVerifyBefore = nil;
-                @try { onVerifyBefore = [self valueForKey:@"onVerify"]; } @catch (NSException *e) {}
-                LOG(@"🌿 onTapVerify 前: onVerify = %@", onVerifyBefore);
-                
-                ((void (*)(id, SEL))orig)(self, @selector(onTapVerify));
-                
-                id onVerifyAfter = nil;
-                @try { onVerifyAfter = [self valueForKey:@"onVerify"]; } @catch (NSException *e) {}
-                LOG(@"🌿 onTapVerify 后: onVerify = %@", onVerifyAfter);
-                LOG(@"🎯 [ActVC] onTapVerify 结束");
-            });
-            class_replaceMethod(actVC, @selector(onTapVerify), newIMP, te);
-            LOG(@"✅ Hook onTapVerify（只记录）");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+        if (!kw) kw = [[UIApplication sharedApplication].windows firstObject];
+        if (kw) {
+            KFDebugPanel *p = [KFDebugPanel shared];
+            [kw addSubview:p];
+            KFLog(@"✅ 悬浮窗已挂载");
         }
-        
-        // 2. showError:：拦截，改为成功
-        m = class_getInstanceMethod(actVC, @selector(showError:));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            const char *te = method_getTypeEncoding(m);
-            IMP newIMP = imp_implementationWithBlock(^(id self, NSString *msg) {
-                LOG(@"🛡️ showError: 拦截 msg = %@", msg);
-                naturalBypass(self);
-            });
-            class_replaceMethod(actVC, @selector(showError:), newIMP, te);
-            LOG(@"✅ Hook showError:（→ 成功）");
-        }
-        
-        // 3. isActivated / isVerified
-        m = class_getInstanceMethod(actVC, @selector(isActivated));
-        if (m) {
-            const char *te = method_getTypeEncoding(m);
-            IMP newIMP = imp_implementationWithBlock(^(id self) { return YES; });
-            class_replaceMethod(actVC, @selector(isActivated), newIMP, te);
-            LOG(@"✅ isActivated -> YES");
-        }
-        
-        m = class_getInstanceMethod(actVC, @selector(isVerified));
-        if (m) {
-            const char *te = method_getTypeEncoding(m);
-            IMP newIMP = imp_implementationWithBlock(^(id self) { return YES; });
-            class_replaceMethod(actVC, @selector(isVerified), newIMP, te);
-            LOG(@"✅ isVerified -> YES");
-        }
-        
-        LOG(@"🚀 v22 ARC修复版 初始化完成");
-        LOG(@"📋 输入任意15位卡密 → 点验证 → 等3秒看结果");
+        RemoveAllAuthMasks();
     });
+    
+    // 定时扫描遮罩
+    [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:YES block:^(NSTimer *t) {
+        RemoveAllAuthMasks();
+    }];
+    
+    // Swizzle UIViewController viewDidAppear:
+    Method m1 = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
+    if (m1) {
+        orig_vcAppear = (void (*)(id, SEL, BOOL))method_getImplementation(m1);
+        method_setImplementation(m1, (IMP)hook_vcAppear);
+    }
+    
+    // Swizzle WKWebView
+    Class wk = NSClassFromString(@"WKWebView");
+    if (wk) {
+        Method m2 = class_getInstanceMethod(wk, @selector(loadRequest:));
+        if (m2) {
+            orig_wkLoadReq = (id (*)(id, SEL, id))method_getImplementation(m2);
+            method_setImplementation(m2, (IMP)hook_wkLoadReq);
+        }
+        Method m3 = class_getInstanceMethod(wk, @selector(loadFileURL:allowingReadAccessToURL:));
+        if (m3) {
+            orig_wkLoadFile = (id (*)(id, SEL, id, id))method_getImplementation(m3);
+            method_setImplementation(m3, (IMP)hook_wkLoadFile);
+        }
+        Method m4 = class_getInstanceMethod(wk, @selector(loadHTMLString:baseURL:));
+        if (m4) {
+            orig_wkLoadHTML = (id (*)(id, SEL, id, id))method_getImplementation(m4);
+            method_setImplementation(m4, (IMP)hook_wkLoadHTML);
+        }
+    }
 }
+
+/*
+================================================================================
+Theos Makefile (保存为 Makefile):
+================================================================================
+TARGET := iphone:clang:latest:15.0
+ARCHS := arm64
+
+include $(THEOS)/makefiles/common.mk
+
+TWEAK_NAME = kfunTweak
+
+kfunTweak_FILES = kfunTweak.m
+kfunTweak_CFLAGS = -fobjc-arc
+kfunTweak_FRAMEWORKS = UIKit WebKit
+
+include $(THEOS_MAKE_PATH)/tweak.mk
+
+================================================================================
+Theos control 文件 (保存为 control):
+================================================================================
+Package: com.yourname.kfuntweak
+Name: KFun Tweak
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: KFun Radar debug & auth bypass
+Maintainer: You
+Author: You
+Section: Tweaks
+Depends: mobilesubstrate
+
+================================================================================
+编译命令:
+    make package
+安装命令:
+    dpkg -i com.yourname.kfuntweak_1.0.0_iphoneos-arm.deb
+================================================================================
+*/
