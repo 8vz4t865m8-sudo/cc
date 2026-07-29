@@ -13,6 +13,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
 
 #pragma mark - 日志引擎
 
@@ -664,7 +665,6 @@ static void kfa_init(void) {
             }
         }
         
-        // 如果类没找到，延迟重试（有些类是懒加载的）
         if (!actVC || !mainVC) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (!actVC) {
