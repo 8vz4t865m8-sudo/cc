@@ -1,4 +1,4 @@
-name: Build IPHook Dylib
+name: Build KFun Autopsy
 
 on:
   push:
@@ -17,28 +17,26 @@ jobs:
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -framework UIKit \
             -framework Foundation \
-            -framework QuartzCore \
-            -framework CoreGraphics \
             -lobjc \
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -dynamiclib \
             -O2 \
             -Wl,-undefined,dynamic_lookup \
-            iphook.m \
-            -o iphook.dylib
-          echo "Dylib size: $(ls -lh iphook.dylib)"
-          file iphook.dylib
+            KFunAutopsy.m \
+            -o KFunAutopsy.dylib
+          echo "Dylib size: $(ls -lh KFunAutopsy.dylib)"
+          file KFunAutopsy.dylib
 
       - name: 签名
         run: |
           brew install ldid-procursus 2>/dev/null || brew install ldid 2>/dev/null || echo "ldid 可能已安装"
-          ldid -S iphook.dylib
+          ldid -S KFunAutopsy.dylib
           echo "签名完成"
-          codesign -dv iphook.dylib 2>&1 | head -5
+          codesign -dv KFunAutopsy.dylib 2>&1 | head -5
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: iphook
-          path: iphook.dylib
+          name: KFunAutopsy
+          path: KFunAutopsy.dylib
