@@ -1,23 +1,23 @@
 //
-//  KFunAutopsy.m
-//  纯 clang 编译版本，无 Theos/Logos 依赖
-//  编译命令：
-//  clang -arch arm64 \
+//  KfunSolo.m
+//  完全独立绕过 · 不依赖任何破解插件
+//  编译：clang -arch arm64 \
 //    -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//    -framework UIKit -framework Foundation \
-//    -lobjc -miphoneos-version-min=15.0 -fobjc-arc \
-//    -dynamiclib -O2 -Wl,-undefined,dynamic_lookup \
-//    KFunAutopsy.m -o KFunAutopsy.dylib
+//    -framework UIKit -framework Foundation -lobjc \
+//    -miphoneos-version-min=15.0 -fobjc-arc -dynamiclib -O2 \
+//    -Wl,-undefined,dynamic_lookup KfunSolo.m -o KfunSolo.dylib
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
+#import <signal.h>
+#import <execinfo.h>
 
 #pragma mark - 日志引擎
 
-@interface KFALogger : NSObject
+@interface KSLogger : NSObject
 + (instancetype)shared;
 - (void)log:(NSString *)fmt, ...;
 - (NSString *)allText;
@@ -26,9 +26,9 @@
 @property (nonatomic, strong) NSDateFormatter *timeFmt;
 @end
 
-@implementation KFALogger
+@implementation KSLogger
 + (instancetype)shared {
-    static KFALogger *s;
+    static KSLogger *s;
     static dispatch_once_t t;
     dispatch_once(&t, ^{ s = [[self alloc] init]; });
     return s;
@@ -48,44 +48,30 @@
     NSString *ts = [_timeFmt stringFromDate:[NSDate date]];
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, msg];
     [_buffer appendString:line];
-    
-    NSArray *docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *logPath = [[docPaths firstObject] stringByAppendingPathComponent:@"kfun_autopsy.log"];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-    if (fh) {
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    } else {
-        [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"KFALogAppend" object:line];
+    NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *path = [[docs firstObject] stringByAppendingPathComponent:@"kfun_solo.log"];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
+    else { [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"KSLogAppend" object:line];
 }
 - (NSString *)allText { return [_buffer copy]; }
-- (void)clear {
-    [_buffer setString:@""];
-    NSArray *docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *logPath = [[docPaths firstObject] stringByAppendingPathComponent:@"kfun_autopsy.log"];
-    [[@"" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:logPath atomically:YES];
-}
+- (void)clear { [_buffer setString:@""]; }
 @end
 
-#define KFA(fmt, ...) [[KFALogger shared] log:fmt, ##__VA_ARGS__]
+#define KS(fmt, ...) [[KSLogger shared] log:fmt, ##__VA_ARGS__]
 
-#pragma mark - 悬浮解剖窗
+#pragma mark - 悬浮窗
 
-@interface KFAWindow : UIWindow
+@interface KSWindow : UIWindow
 @property (nonatomic, strong) UITextView *console;
-@property (nonatomic, strong) UIView *topBar;
 @end
 
-@implementation KFAWindow
-
+@implementation KSWindow
 - (instancetype)init {
     CGRect sr = [UIScreen mainScreen].bounds;
-    CGFloat W = sr.size.width * 0.88;
-    CGFloat H = sr.size.height * 0.50;
-    self = [super initWithFrame:CGRectMake((sr.size.width - W) / 2, 60, W, H)];
+    CGFloat W = sr.size.width * 0.88, H = sr.size.height * 0.50;
+    self = [super initWithFrame:CGRectMake((sr.size.width-W)/2, 60, W, H)];
     if (self) {
         self.windowLevel = UIWindowLevelAlert + 200;
         self.backgroundColor = [UIColor colorWithWhite:0.03 alpha:0.94];
@@ -93,587 +79,554 @@
         self.layer.borderWidth = 1.0;
         self.layer.borderColor = [UIColor colorWithRed:0.0 green:0.8 blue:0.4 alpha:1.0].CGColor;
         self.hidden = NO;
-        
         if (@available(iOS 13.0, *)) {
             for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if ([scene isKindOfClass:[UIWindowScene class]] && ((UIWindowScene *)scene).activationState == UISceneActivationStateForegroundActive) {
-                    self.windowScene = (UIWindowScene *)scene;
-                    break;
+                    self.windowScene = (UIWindowScene *)scene; break;
                 }
             }
         }
-        
-        _topBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, 34)];
-        _topBar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.98];
-        [self addSubview:_topBar];
-        
-        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, W - 140, 26)];
-        title.text = @"🔬 KFun Autopsy";
-        title.font = [UIFont boldSystemFontOfSize:12];
-        title.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.5 alpha:1.0];
-        [_topBar addSubview:title];
-        
+        UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, 34)];
+        bar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.98];
+        [self addSubview:bar];
+        UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, W-140, 26)];
+        t.text = @"🚀 KfunSolo v1"; t.font = [UIFont boldSystemFontOfSize:12];
+        t.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.5 alpha:1.0];
+        [bar addSubview:t];
         UIButton *cp = [UIButton buttonWithType:UIButtonTypeSystem];
-        cp.frame = CGRectMake(W - 130, 2, 60, 30);
+        cp.frame = CGRectMake(W-130, 2, 60, 30);
         [cp setTitle:@"📋复制" forState:UIControlStateNormal];
         cp.titleLabel.font = [UIFont systemFontOfSize:11];
         [cp setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
         [cp addTarget:self action:@selector(copyAll) forControlEvents:UIControlEventTouchUpInside];
-        [_topBar addSubview:cp];
-        
+        [bar addSubview:cp];
         UIButton *cl = [UIButton buttonWithType:UIButtonTypeSystem];
-        cl.frame = CGRectMake(W - 65, 2, 60, 30);
+        cl.frame = CGRectMake(W-65, 2, 60, 30);
         [cl setTitle:@"🗑清空" forState:UIControlStateNormal];
         cl.titleLabel.font = [UIFont systemFontOfSize:11];
         [cl setTitleColor:[UIColor orangeColor] forState:UIControlStateNormal];
         [cl addTarget:self action:@selector(clearAll) forControlEvents:UIControlEventTouchUpInside];
-        [_topBar addSubview:cl];
-        
-        _console = [[UITextView alloc] initWithFrame:CGRectMake(3, 38, W - 6, H - 42)];
+        [bar addSubview:cl];
+        _console = [[UITextView alloc] initWithFrame:CGRectMake(3, 38, W-6, H-42)];
         _console.backgroundColor = [UIColor clearColor];
         _console.textColor = [UIColor colorWithRed:0.0 green:0.85 blue:0.4 alpha:1.0];
         _console.font = [UIFont fontWithName:@"Courier" size:9];
-        _console.editable = NO;
-        _console.selectable = YES;
-        _console.showsVerticalScrollIndicator = YES;
+        _console.editable = NO; _console.selectable = YES;
         [self addSubview:_console];
-        
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
-        [_topBar addGestureRecognizer:pan];
-        
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onNewLine:) name:@"KFALogAppend" object:nil];
+        [bar addGestureRecognizer:pan];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLine:) name:@"KSLogAppend" object:nil];
     }
     return self;
 }
-
-- (void)onNewLine:(NSNotification *)n {
+- (void)onLine:(NSNotification *)n {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *line = n.object;
         self.console.text = [NSString stringWithFormat:@"%@%@", self.console.text, line];
-        [self.console scrollRangeToVisible:NSMakeRange(self.console.text.length - 1, 1)];
+        [self.console scrollRangeToVisible:NSMakeRange(self.console.text.length-1, 1)];
     });
 }
-
-- (void)copyAll {
-    UIPasteboard.generalPasteboard.string = [KFALogger shared].allText;
-    KFA(@"[SYS] 全部日志已复制到剪贴板");
-}
-
-- (void)clearAll {
-    [[KFALogger shared] clear];
-    self.console.text = @"";
-    KFA(@"=== 日志已清空 ===");
-}
-
+- (void)copyAll { UIPasteboard.generalPasteboard.string = [KSLogger shared].allText; KS(@"[SYS] 已复制"); }
+- (void)clearAll { [[KSLogger shared] clear]; self.console.text = @""; KS(@"=== 已清空 ==="); }
 - (void)drag:(UIPanGestureRecognizer *)g {
     CGPoint t = [g translationInView:self.superview];
-    self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
+    self.center = CGPointMake(self.center.x+t.x, self.center.y+t.y);
     [g setTranslation:CGPointZero inView:self.superview];
 }
-
 @end
 
-static KFAWindow *g_win = nil;
+static KSWindow *g_win = nil;
 
-#pragma mark - 辅助函数
+#pragma mark - 崩溃捕获
+
+static void ks_crash_handler(int sig, siginfo_t *info, void *ctx) {
+    KS(@"[CRASH] ⚠️ 信号: sig=%d addr=%p", sig, info->si_addr);
+    void *frames[32]; int n = backtrace(frames, 32);
+    char **syms = backtrace_symbols(frames, n);
+    for (int i = 0; i < n; i++) KS(@"  ↳ [%d] %s", i, syms[i]);
+    free(syms); signal(sig, SIG_DFL); raise(sig);
+}
+
+static void ks_exception_handler(NSException *e) {
+    KS(@"[CRASH] ⚠️ 异常: %@", e.name);
+    KS(@"[CRASH] Reason: %@", e.reason);
+    KS(@"[CRASH] Stack: %@", [e callStackSymbols]);
+}
+
+#pragma mark - 辅助
 
 static void dumpDict(id obj, int depth) {
     if (!obj || ![obj isKindOfClass:[NSDictionary class]]) {
-        KFA(@"%@⚠️ 非字典: %@ (%@)", [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0], obj, NSStringFromClass([obj class]));
+        KS(@"%@⚠️ 非字典: %@ (%@)", [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0], obj, NSStringFromClass([obj class]));
         return;
     }
-    NSDictionary *d = obj;
-    for (id k in d) {
-        id v = d[k];
-        NSString *ind = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
+    for (id k in (NSDictionary *)obj) {
+        id v = ((NSDictionary *)obj)[k];
+        NSString *ind = [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0];
         if ([v isKindOfClass:[NSDictionary class]]) {
-            KFA(@"%@\"%@\" → {", ind, k);
-            dumpDict(v, depth + 1);
-            KFA(@"%@}", ind);
+            KS(@"%@\"%@\" → {", ind, k);
+            dumpDict(v, depth+1);
+            KS(@"%@}", ind);
         } else if ([v isKindOfClass:[NSArray class]]) {
-            KFA(@"%@\"%@\" → [%lu]", ind, k, (unsigned long)[(NSArray *)v count]);
-            for (id item in (NSArray *)v) KFA(@"%@  · %@", ind, item);
+            KS(@"%@\"%@\" → [%lu]", ind, k, (unsigned long)[(NSArray *)v count]);
+            for (id item in (NSArray *)v) KS(@"%@  · %@", ind, item);
         } else {
-            NSString *desc = [v description];
-            if (desc.length > 120) desc = [desc substringToIndex:120];
-            KFA(@"%@\"%@\" = \"%@\" [%@]", ind, k, desc, NSStringFromClass([v class]));
+            NSString *d = [v description];
+            if (d.length > 120) d = [d substringToIndex:120];
+            KS(@"%@\"%@\" = \"%@\" [%@]", ind, k, d, NSStringFromClass([v class]));
         }
     }
 }
 
 static void logStack(int skip, int max) {
     NSArray *syms = [NSThread callStackSymbols];
-    for (int i = skip + 2; i < MIN((int)syms.count, skip + 2 + max); i++) {
-        KFA(@"  ↳ %@", syms[i]);
-    }
+    for (int i = skip+2; i < MIN((int)syms.count, skip+2+max); i++) KS(@"  ↳ %@", syms[i]);
 }
 
-#pragma mark - Hook 1: WWWActivationViewController
+#pragma mark - 伪造验证数据
 
-static void hookActivationVC(Class cls) {
-    if (!cls) { KFA(@"[INIT] ❌ WWWActivationViewController not found"); return; }
-    KFA(@"[INIT] Hooking WWWActivationViewController");
-    
-    Method m;
-    
-    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self) {
-            KFA(@"[ACT] viewDidLoad");
-            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ viewDidLoad");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, BOOL animated) {
-            KFA(@"[ACT] viewDidAppear");
-            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ viewDidAppear:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(onTapVerify));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self) {
-            KFA(@"[ACT] ⭐ onTapVerify triggered");
-            logStack(0, 4);
-            ((void (*)(id, SEL))orig)(self, @selector(onTapVerify));
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ onTapVerify");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, NSString *code, void (^completion)(BOOL, id)) {
-            KFA(@"[ACT] ⭐ activateCode: \"%@\"", code);
-            logStack(0, 3);
-            void (^wrapped)(BOOL, id) = ^(BOOL success, id data) {
-                KFA(@"[ACT] ⭐ activateCode completion callback");
-                KFA(@"[ACT]   success = %d", success);
-                KFA(@"[ACT]   data class = %@", NSStringFromClass([data class]));
-                if ([data isKindOfClass:[NSDictionary class]]) {
-                    KFA(@"[ACT]   data structure:");
-                    dumpDict(data, 1);
-                } else if (data) {
-                    KFA(@"[ACT]   data = %@", [data description]);
-                }
-                if (completion) completion(success, data);
-            };
-            ((void (*)(id, SEL, NSString *, void (^)(BOOL, id)))orig)(self, @selector(activateCode:completion:), code, wrapped);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ activateCode:completion:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(showSuccess:completion:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, id msg, void (^completion)(void)) {
-            KFA(@"[ACT] ⭐ showSuccess: %@", msg);
-            KFA(@"[ACT]   completion block = %@", completion);
-            void (^wrapped)(void) = ^{
-                KFA(@"[ACT] ⭐ showSuccess completion block START");
-                logStack(0, 6);
-                if (completion) completion();
-                KFA(@"[ACT]   showSuccess completion block END");
-            };
-            ((void (*)(id, SEL, id, void (^)(void)))orig)(self, @selector(showSuccess:completion:), msg, wrapped);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ showSuccess:completion:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(showError:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, id msg) {
-            KFA(@"[ACT] showError: %@", msg);
-            logStack(0, 4);
-            ((void (*)(id, SEL, id))orig)(self, @selector(showError:), msg);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ showError:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(buildSuccessViewWithExpire:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, id expire) {
-            KFA(@"[ACT] buildSuccessViewWithExpire: %@", expire);
-            logStack(0, 4);
-            ((void (*)(id, SEL, id))orig)(self, @selector(buildSuccessViewWithExpire:), expire);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ buildSuccessViewWithExpire:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(isActivated));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^BOOL(id self) {
-            BOOL v = ((BOOL (*)(id, SEL))orig)(self, @selector(isActivated));
-            KFA(@"[ACT] isActivated → %d", v);
-            return v;
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ isActivated");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(isVerified));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^BOOL(id self) {
-            BOOL v = ((BOOL (*)(id, SEL))orig)(self, @selector(isVerified));
-            KFA(@"[ACT] isVerified → %d", v);
-            return v;
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ isVerified");
-    }
+static NSDictionary *buildFakeResponse(void) {
+    // 基于 KfunHook 情报构造的响应结构
+    // 包含所有已知字段，值合理猜测
+    return @{
+        @"success": @YES,
+        @"message": @"激活成功",
+        @"data": @{
+            @"expires_at": @"2099-12-31T23:59:59Z",
+            @"expire": @"2099-12-31T23:59:59Z",
+            @"endtime": @"2099-12-31 23:59:59",
+            @"time": @"2099-12-31 23:59:59",
+            @"vip_time": @"2099-12-31 23:59:59",
+            @"status": @"active",
+            @"appid": @"951951",
+            @"action": @"activate"
+        },
+        @"status": @"success"
+    };
 }
 
-#pragma mark - Hook 2: ViewController
-
-static void hookViewController(Class cls) {
-    if (!cls) { KFA(@"[INIT] ❌ ViewController not found"); return; }
-    KFA(@"[INIT] Hooking ViewController");
-    
-    Method m;
-    
-    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self) {
-            KFA(@"[MAIN] viewDidLoad");
-            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ viewDidLoad");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, BOOL animated) {
-            KFA(@"[MAIN] viewDidAppear:");
-            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ viewDidAppear:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(setupAfterActivation));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self) {
-            KFA(@"[MAIN] ⭐ setupAfterActivation called");
-            logStack(0, 5);
-            ((void (*)(id, SEL))orig)(self, @selector(setupAfterActivation));
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ setupAfterActivation");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(setupBackgroundKeepAlive));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self) {
-            KFA(@"[MAIN] setupBackgroundKeepAlive called");
-            ((void (*)(id, SEL))orig)(self, @selector(setupBackgroundKeepAlive));
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ setupBackgroundKeepAlive");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(tableView:numberOfRowsInSection:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^NSInteger(id self, UITableView *tv, NSInteger section) {
-            NSInteger n = ((NSInteger (*)(id, SEL, UITableView *, NSInteger))orig)(self, @selector(tableView:numberOfRowsInSection:), tv, section);
-            KFA(@"[MAIN] tableView rows=%ld (section=%ld)", (long)n, (long)section);
-            return n;
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ tableView:numberOfRowsInSection:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(tableView:cellForRowAtIndexPath:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^UITableViewCell *(id self, UITableView *tv, NSIndexPath *ip) {
-            UITableViewCell *c = ((UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))orig)(self, @selector(tableView:cellForRowAtIndexPath:), tv, ip);
-            KFA(@"[MAIN] tableView cell[%ld,%ld] = \"%@\"", (long)ip.section, (long)ip.row, c.textLabel.text);
-            return c;
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ tableView:cellForRowAtIndexPath:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(tableView));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^id(id self) {
-            id v = ((id (*)(id, SEL))orig)(self, @selector(tableView));
-            KFA(@"[MAIN] getter tableView → %@", v ? @"non-nil" : @"nil");
-            return v;
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ tableView getter");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(langSeg));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^id(id self) {
-            id v = ((id (*)(id, SEL))orig)(self, @selector(langSeg));
-            KFA(@"[MAIN] getter langSeg → %@", v ? @"non-nil" : @"nil");
-            return v;
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ langSeg getter");
-    }
+static void injectFakeState(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:@"DP5372QRM1NK3L7" forKey:@"xTcAwvyFDr9CujLx"];
+    [ud setBool:YES forKey:@"kfun_activated"];
+    [ud setObject:@"2099-12-31T23:59:59Z" forKey:@"expire_date"];
+    [ud setObject:@"951951" forKey:@"appid"];
+    [ud synchronize];
+    KS(@"[FAKE] 已注入伪造验证状态");
 }
 
-#pragma mark - Hook 3: NSURLSession
+#pragma mark - 补全初始化链
 
-static void hookNSURLSession(void) {
-    Class cls = [NSURLSession class];
-    Method m = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-    if (!m) { KFA(@"[INIT] ❌ NSURLSession dataTaskWithRequest: not found"); return; }
+static void runFullInitChain(id activationVC) {
+    KS(@"[INIT] ⭐ 开始补全初始化链");
     
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^NSURLSessionDataTask *(NSURLSession *self, NSURLRequest *req, void (^cb)(NSData *, NSURLResponse *, NSError *)) {
-        KFA(@"[NET] %@ %@", req.HTTPMethod, req.URL.absoluteString);
-        if (req.HTTPBody) {
-            NSString *b = [[NSString alloc] initWithData:req.HTTPBody encoding:NSUTF8StringEncoding];
-            if (b) KFA(@"[NET] BODY: %@", b);
+    // 1. 停止 spinner
+    @try {
+        id spinner = [activationVC valueForKey:@"spinner"];
+        if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
+            [(UIActivityIndicatorView *)spinner stopAnimating];
+            [(UIActivityIndicatorView *)spinner setHidden:YES];
+            KS(@"[INIT]   spinner 已停止");
         }
-        if (req.allHTTPHeaderFields) KFA(@"[NET] HDR: %@", req.allHTTPHeaderFields);
+    } @catch (NSException *e) {}
+    
+    // 2. 隐藏 errorLabel
+    @try {
+        id err = [activationVC valueForKey:@"errorLabel"];
+        if (err && [err isKindOfClass:[UIView class]]) [(UIView *)err setHidden:YES];
+    } @catch (NSException *e) {}
+    
+    // 3. 移除遮罩
+    @try {
+        id mask = [activationVC valueForKey:@"authMaskView"];
+        if (mask && [mask isKindOfClass:[UIView class]]) {
+            [(UIView *)mask setHidden:YES];
+            [(UIView *)mask removeFromSuperview];
+            KS(@"[INIT]   authMaskView 已移除");
+        }
+    } @catch (NSException *e) {}
+    
+    // 4. 调用 buildSuccessViewWithExpire:
+    @try {
+        if ([activationVC respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
+            // 构造一个 NSDate 对象传入（破解版传的是字符串，这是错误之一）
+            NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+            fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+            NSDate *expire = [fmt dateFromString:@"2099-12-31 23:59:59"];
+            if (!expire) expire = [NSDate dateWithTimeIntervalSince1970:4102444799]; // 2099-12-31
+            [activationVC performSelector:@selector(buildSuccessViewWithExpire:) withObject:expire];
+            KS(@"[INIT]   buildSuccessViewWithExpire: 已调用 (%@)", expire);
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   buildSuccessViewWithExpire: 异常: %@", e.reason); }
+    
+    // 5. 调用 showSuccess:completion:（如果存在）
+    @try {
+        if ([activationVC respondsToSelector:@selector(showSuccess:completion:)]) {
+            void (^comp)(void) = ^{
+                KS(@"[INIT]   showSuccess completion 执行");
+            };
+            [activationVC performSelector:@selector(showSuccess:completion:) withObject:@"到期时间:2099-12-31 23:59:59" withObject:comp];
+            KS(@"[INIT]   showSuccess:completion: 已调用");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   showSuccess:completion: 异常: %@", e.reason); }
+    
+    // 6. 延迟执行后续初始化（给 dismiss 时间）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        KS(@"[INIT]   延迟初始化开始...");
         
-        void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *d, NSURLResponse *r, NSError *e) {
-            NSHTTPURLResponse *h = (NSHTTPURLResponse *)r;
-            if (h) KFA(@"[NET] RESP %ld ← %@", (long)h.statusCode, h.URL.absoluteString);
-            if (e) KFA(@"[NET] ERR: %@", e);
-            if (d) {
-                NSString *t = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-                if (t && t.length < 800) {
-                    KFA(@"[NET] DATA: %@", t);
-                    id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-                    if ([j isKindOfClass:[NSDictionary class]]) { KFA(@"[NET] JSON:"); dumpDict(j, 1); }
-                } else if (t) {
-                    KFA(@"[NET] DATA: (text, %lu chars)", (unsigned long)t.length);
+        // 6a. 尝试 dismiss
+        @try {
+            if ([activationVC isKindOfClass:[UIViewController class]]) {
+                UIViewController *vc = (UIViewController *)activationVC;
+                if (vc.presentingViewController) {
+                    [vc dismissViewControllerAnimated:NO completion:^{
+                        KS(@"[INIT]   dismiss 完成");
+                        [self _ks_postDismissInit];
+                    }];
                 } else {
-                    KFA(@"[NET] DATA: (binary, %lu bytes)", (unsigned long)d.length);
+                    [self _ks_postDismissInit];
                 }
+            } else {
+                [self _ks_postDismissInit];
             }
-            if (cb) cb(d, r, e);
-        };
-        return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig)(self, @selector(dataTaskWithRequest:completionHandler:), req, wrapped);
+        } @catch (NSException *e) {
+            KS(@"[INIT]   dismiss 异常: %@", e.reason);
+            [self _ks_postDismissInit];
+        }
     });
-    method_setImplementation(m, newIMP);
-    KFA(@"[INIT]   ✅ NSURLSession dataTaskWithRequest:");
 }
 
-#pragma mark - Hook 4: NSUserDefaults
-
-static void hookNSUserDefaults(void) {
-    Class cls = [NSUserDefaults class];
-    Method m;
-    
-    m = class_getInstanceMethod(cls, @selector(setObject:forKey:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, id obj, NSString *key) {
-            KFA(@"[STORE] SET \"%@\" = \"%@\"", key, obj);
-            ((void (*)(id, SEL, id, NSString *))orig)(self, @selector(setObject:forKey:), obj, key);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ NSUserDefaults setObject:forKey:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(objectForKey:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^id(id self, NSString *key) {
-            id v = ((id (*)(id, SEL, NSString *))orig)(self, @selector(objectForKey:), key);
-            NSArray *keys = @[@"auth", @"token", @"license", @"expire", @"kfun", @"xpf", @"config", @"verify", @"status", @"user", @"device"];
-            for (NSString *k in keys) {
-                if ([key containsString:k]) {
-                    KFA(@"[STORE] GET \"%@\" = \"%@\"", key, v);
-                    break;
-                }
-            }
-            return v;
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ NSUserDefaults objectForKey:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(setInteger:forKey:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, NSInteger value, NSString *key) {
-            KFA(@"[STORE] SET_INT \"%@\" = %ld", key, (long)value);
-            ((void (*)(id, SEL, NSInteger, NSString *))orig)(self, @selector(setInteger:forKey:), value, key);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ NSUserDefaults setInteger:forKey:");
-    }
-    
-    m = class_getInstanceMethod(cls, @selector(setBool:forKey:));
-    if (m) {
-        __block IMP orig = method_getImplementation(m);
-        IMP newIMP = imp_implementationWithBlock(^void(id self, BOOL value, NSString *key) {
-            KFA(@"[STORE] SET_BOOL \"%@\" = %d", key, value);
-            ((void (*)(id, SEL, BOOL, NSString *))orig)(self, @selector(setBool:forKey:), value, key);
-        });
-        method_setImplementation(m, newIMP);
-        KFA(@"[INIT]   ✅ NSUserDefaults setBool:forKey:");
-    }
-}
-
-#pragma mark - Hook 5: UIAlertController
-
-static void hookUIAlertController(void) {
-    Class cls = [UIAlertController class];
-    Method m = class_getClassMethod(cls, @selector(alertControllerWithTitle:message:preferredStyle:));
-    if (!m) { KFA(@"[INIT] ❌ UIAlertController class method not found"); return; }
-    
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^id(id self, NSString *title, NSString *message, UIAlertControllerStyle style) {
-        KFA(@"[ALERT] TITLE: \"%@\"", title);
-        KFA(@"[ALERT] MSG: \"%@\"", message);
-        logStack(0, 5);
-        return ((id (*)(id, SEL, NSString *, NSString *, UIAlertControllerStyle))orig)(self, @selector(alertControllerWithTitle:message:preferredStyle:), title, message, style);
-    });
-    method_setImplementation(m, newIMP);
-    KFA(@"[INIT]   ✅ UIAlertController alertControllerWithTitle:");
-}
-
-#pragma mark - Hook 6: 全局查找 startContinuousAuthCheck
-
-static void hookContinuousAuthCheck(void) {
-    int numClasses = objc_getClassList(NULL, 0);
-    if (numClasses <= 0) { KFA(@"[INIT] No classes found"); return; }
-    
-    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-    objc_getClassList(classes, numClasses);
-    int hooked = 0;
-    
-    for (int i = 0; i < numClasses; i++) {
-        if (class_respondsToSelector(classes[i], @selector(startContinuousAuthCheck))) {
-            const char *clsName = class_getName(classes[i]);
-            KFA(@"[INIT] Found startContinuousAuthCheck in class: %s", clsName);
-            
-            Method m = class_getInstanceMethod(classes[i], @selector(startContinuousAuthCheck));
-            if (m) {
-                __block IMP orig = method_getImplementation(m);
-                IMP newIMP = imp_implementationWithBlock(^void(id self) {
-                    KFA(@"[AUTH] ⭐ startContinuousAuthCheck called in %s", clsName);
-                    logStack(0, 6);
-                    ((void (*)(id, SEL))orig)(self, @selector(startContinuousAuthCheck));
-                });
-                method_setImplementation(m, newIMP);
-                hooked++;
+// 延迟初始化（dismiss 后执行）
++ (void)_ks_postDismissInit {
+    // 找到主页 ViewController
+    Class mainClass = objc_getClass("ViewController");
+    __block id mainVC = nil;
+    for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        UIViewController *root = window.rootViewController;
+        if ([root isKindOfClass:mainClass]) { mainVC = root; break; }
+        // 也可能在导航控制器里
+        if ([root isKindOfClass:[UINavigationController class]]) {
+            UINavigationController *nav = (UINavigationController *)root;
+            for (UIViewController *vc in nav.viewControllers) {
+                if ([vc isKindOfClass:mainClass]) { mainVC = vc; break; }
             }
         }
+        if (mainVC) break;
     }
-    free(classes);
-    KFA(@"[INIT]   ✅ startContinuousAuthCheck hooked in %d class(es)", hooked);
+    
+    if (!mainVC) {
+        KS(@"[INIT]   ❌ 未找到主页 ViewController");
+        return;
+    }
+    KS(@"[INIT]   找到主页: %@", mainVC);
+    
+    // 7. 调用 setupAfterActivation
+    @try {
+        if ([mainVC respondsToSelector:@selector(setupAfterActivation)]) {
+            [mainVC performSelector:@selector(setupAfterActivation)];
+            KS(@"[INIT]   ✅ setupAfterActivation 已调用");
+        } else {
+            KS(@"[INIT]   ⚠️ setupAfterActivation 不存在");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ setupAfterActivation 异常: %@", e.reason); }
+    
+    // 8. 调用 setupBackgroundKeepAlive
+    @try {
+        if ([mainVC respondsToSelector:@selector(setupBackgroundKeepAlive)]) {
+            [mainVC performSelector:@selector(setupBackgroundKeepAlive)];
+            KS(@"[INIT]   ✅ setupBackgroundKeepAlive 已调用");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ setupBackgroundKeepAlive 异常: %@", e.reason); }
+    
+    // 9. 调用 startContinuousAuthCheck
+    @try {
+        if ([mainVC respondsToSelector:@selector(startContinuousAuthCheck)]) {
+            [mainVC performSelector:@selector(startContinuousAuthCheck)];
+            KS(@"[INIT]   ✅ startContinuousAuthCheck 已调用");
+        } else {
+            KS(@"[INIT]   ⚠️ startContinuousAuthCheck 不存在于主页");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ startContinuousAuthCheck 异常: %@", e.reason); }
+    
+    // 10. 刷新 tableView
+    @try {
+        id tv = [mainVC valueForKey:@"tableView"];
+        if (tv && [tv isKindOfClass:[UITableView class]]) {
+            [(UITableView *)tv reloadData];
+            KS(@"[INIT]   ✅ tableView reloadData");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ tableView 刷新异常: %@", e.reason); }
+    
+    // 11. 尝试 XPF 初始化
+    [self _ks_initXPF];
 }
 
-#pragma mark - 观察 libxpf.dylib 加载
-
-static void checkLibxpfLoaded(void) {
-    static BOOL found = NO;
-    if (found) return;
-    
++ (void)_ks_initXPF {
+    KS(@"[XPF] 尝试初始化...");
     unsigned int count = _dyld_image_count();
+    void *handle = NULL;
     for (unsigned int i = 0; i < count; i++) {
         const char *name = _dyld_get_image_name(i);
         if (strstr(name, "libxpf.dylib")) {
-            found = YES;
-            KFA(@"[DYLIB] ⭐ libxpf.dylib detected at index %d: %s", i, name);
-            
-            void *handle = dlopen(name, RTLD_NOLOAD);
-            if (handle) {
-                KFA(@"[DYLIB] handle = %p", handle);
-                const char *syms[] = {"xpf_init", "xpf_start", "xpf_find_cpu_ttep", "xpf_find_allproc", "xpf_find_arm_vm_init"};
-                for (int j = 0; j < 5; j++) {
-                    void *addr = dlsym(handle, syms[j]);
-                    if (addr) KFA(@"[DYLIB] %s = %p", syms[j], addr);
-                }
-            } else {
-                KFA(@"[DYLIB] dlopen(RTLD_NOLOAD) failed");
-            }
-            return;
+            handle = dlopen(name, RTLD_NOLOAD);
+            KS(@"[XPF] libxpf found: %s handle=%p", name, handle);
+            break;
         }
     }
+    if (!handle) { KS(@"[XPF] ❌ libxpf not loaded"); return; }
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        checkLibxpfLoaded();
+    // 尝试所有可能的符号
+    const char *syms[] = {
+        "init", "start", "run", "open", "setup", "config",
+        "xpf_init", "xpf_start", "xpf_run", "xpf_open", "xpf_setup",
+        "xpf_find_cpu_ttep", "xpf_find_allproc", "xpf_find_arm_vm_init",
+        "xpf_find_kern_version", "xpf_find_pmap_enter_options",
+        "xpf_find_ptov_table", "xpf_find_vm_first_phys", "xpf_find_vm_last_phys",
+        "xpf_find_physmap_base", "xpf_find_kernel_slide", "xpf_find_gPhysBase",
+        "xpf_find_gPhysSize", "xpf_find_gVirtBase",
+        NULL
+    };
+    int found = 0;
+    for (int i = 0; syms[i]; i++) {
+        void *addr = dlsym(handle, syms[i]);
+        if (addr) {
+            KS(@"[XPF]   dlsym(%s) = %p", syms[i], addr);
+            found++;
+        }
+    }
+    if (found == 0) KS(@"[XPF]   所有符号均未找到（已被 strip）");
+    
+    // 如果符号被 strip，尝试通过 Objective-C runtime 找类
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses > 0) {
+        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+        objc_getClassList(classes, numClasses);
+        for (int i = 0; i < numClasses; i++) {
+            const char *name = class_getName(classes[i]);
+            if (strstr(name, "xpf") || strstr(name, "XPF") || strstr(name, "kfd") || strstr(name, "KFD")) {
+                KS(@"[XPF]   发现相关类: %s", name);
+                // 打印方法列表
+                unsigned int mc = 0;
+                Method *methods = class_copyMethodList(classes[i], &mc);
+                for (unsigned int j = 0; j < mc; j++) {
+                    KS(@"[XPF]     方法: %s", sel_getName(method_getName(methods[j])));
+                }
+                if (methods) free(methods);
+            }
+        }
+        free(classes);
+    }
+}
+
+#pragma mark - Hook 入口
+
+static void hookOnTapVerify(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(onTapVerify));
+    if (!m) { KS(@"[HOOK] ❌ onTapVerify not found"); return; }
+    KS(@"[HOOK] ✅ onTapVerify");
+    
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^void(id self) {
+        KS(@"[ACT] ⭐ onTapVerify 拦截 — 开始自主验证");
+        logStack(0, 3);
+        
+        // 1. 注入伪造状态
+        injectFakeState();
+        
+        // 2. 构造假响应，直接调用 activateCode:completion: 的 completion
+        // 如果原版 activateCode:completion: 存在，我们模拟它的成功回调
+        if ([self respondsToSelector:@selector(activateCode:completion:)]) {
+            KS(@"[ACT]   通过 activateCode:completion: 注入");
+            NSDictionary *fakeData = buildFakeResponse();
+            void (^fakeCompletion)(BOOL, id) = ^(BOOL success, id data) {
+                KS(@"[ACT]   伪造 completion 被调用 success=%d", success);
+                // 原版 completion 里应该会调用 showSuccess
+                // 我们同时启动补全链
+                runFullInitChain(self);
+            };
+            // 直接调用原版方法，但传入假 completion？不，我们直接执行假 completion
+            // 因为原版方法会发送网络请求，我们不想等
+            fakeCompletion(YES, fakeData);
+        } else {
+            KS(@"[ACT]   activateCode:completion: 不存在，直接走补全链");
+            runFullInitChain(self);
+        }
     });
+    method_setImplementation(m, newIMP);
+}
+
+static void hookActivateCode(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
+    if (!m) { KS(@"[HOOK] ⚠️ activateCode:completion: not found"); return; }
+    KS(@"[HOOK] ✅ activateCode:completion:");
+    
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^void(id self, NSString *code, void (^completion)(BOOL, id)) {
+        KS(@"[ACT] ⭐ activateCode: 拦截 — 跳过网络，直接返回成功");
+        logStack(0, 3);
+        
+        injectFakeState();
+        NSDictionary *fakeData = buildFakeResponse();
+        
+        // 先走原版（如果它内部有我们需要的状态设置）
+        // 但替换 completion 为我们的包装版本
+        void (^wrapped)(BOOL, id) = ^(BOOL success, id data) {
+            KS(@"[ACT]   原版 completion 被触发（或被我们替换）");
+            if (completion) completion(YES, fakeData);
+        };
+        
+        // 直接调用 completion，不发送网络请求
+        wrapped(YES, fakeData);
+        
+        // 同时启动补全链
+        runFullInitChain(self);
+    });
+    method_setImplementation(m, newIMP);
+}
+
+static void hookVerifyWithCompletion(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
+    if (!m) { KS(@"[HOOK] ⚠️ verifyWithCompletion: not found"); return; }
+    KS(@"[HOOK] ✅ verifyWithCompletion:");
+    
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^void(id self, void (^completion)(void)) {
+        KS(@"[ACT] ⭐ verifyWithCompletion: 拦截");
+        injectFakeState();
+        if (completion) completion();
+        runFullInitChain(self);
+    });
+    method_setImplementation(m, newIMP);
+}
+
+static void hookShowSuccess(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(showSuccess:completion:));
+    if (!m) return;
+    KS(@"[HOOK] ✅ showSuccess:completion:");
+    
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^void(id self, id msg, void (^completion)(void)) {
+        KS(@"[ACT] ⭐ showSuccess: %@", msg);
+        void (^wrapped)(void) = ^{
+            if (completion) completion();
+            KS(@"[ACT]   showSuccess completion 执行完毕");
+        };
+        ((void (*)(id, SEL, id, void (^)(void)))orig)(self, @selector(showSuccess:completion:), msg, wrapped);
+    });
+    method_setImplementation(m, newIMP);
+}
+
+static void hookSetupAfterActivation(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(setupAfterActivation));
+    if (!m) return;
+    KS(@"[HOOK] ✅ setupAfterActivation in %s", class_getName(cls));
+    
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^void(id self) {
+        KS(@"[MAIN] ⭐ setupAfterActivation START");
+        logStack(0, 6);
+        ((void (*)(id, SEL))orig)(self, @selector(setupAfterActivation));
+        KS(@"[MAIN]   setupAfterActivation END");
+    });
+    method_setImplementation(m, newIMP);
+}
+
+static void hookStartContinuousAuthCheck(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(startContinuousAuthCheck));
+    if (!m) return;
+    KS(@"[HOOK] ✅ startContinuousAuthCheck in %s", class_getName(cls));
+    
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^void(id self) {
+        KS(@"[AUTH] ⭐ startContinuousAuthCheck START");
+        logStack(0, 6);
+        ((void (*)(id, SEL))orig)(self, @selector(startContinuousAuthCheck));
+        KS(@"[AUTH]   startContinuousAuthCheck END");
+    });
+    method_setImplementation(m, newIMP);
 }
 
 #pragma mark - 构造函数
 
 __attribute__((constructor))
-static void kfa_init(void) {
+static void ks_init(void) {
     NSLog(@"========================================");
-    NSLog(@"[KFunAutopsy] Pure clang version loaded");
+    NSLog(@"[KfunSolo] v1 - Independent Bypass");
     NSLog(@"========================================");
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        g_win = [[KFAWindow alloc] init];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        g_win = [[KSWindow alloc] init];
         
-        KFA(@"=== KFun Autopsy 启动 ===");
-        KFA(@"使用说明：");
-        KFA(@"1. 输入正版卡密，点击验证");
-        KFA(@"2. 观察 [ACT] 激活流程 和 [NET] 网络请求");
-        KFA(@"3. 观察 [MAIN] 主页加载 和 [STORE] 数据存储");
-        KFA(@"4. 点击 📋复制，把日志发给我");
-        KFA(@"5. 重点观察 ⭐ 标记的关键节点");
+        KS(@"=== KfunSolo v1 启动 ===");
+        KS(@"模式：完全独立绕过，不依赖任何外部插件");
+        KS(@"策略：");
+        KS(@"1. 拦截 onTapVerify / activateCode / verifyWithCompletion");
+        KS(@"2. 跳过网络请求，直接注入伪造验证状态");
+        KS(@"3. 调用 showSuccess + 补全 setupAfterActivation");
+        KS(@"4. 强制调用 startContinuousAuthCheck");
+        KS(@"5. 尝试 XPF 初始化（符号遍历 + ObjC runtime 扫描）");
+        KS(@"6. 崩溃捕获（SIGSEGV/SIGBUS/SIGILL/SIGABRT）");
+        KS(@"");
+        KS(@"使用说明：");
+        KS(@"1. 输入任意卡密（甚至不输入），点击验证");
+        KS(@"2. 观察悬浮窗日志");
+        KS(@"3. 如果主页显示内容 → 数据层成功");
+        KS(@"4. 点击功能按钮，如果崩溃 → 看日志里的 [CRASH]");
+        KS(@"5. 点击 📋复制，把日志发给我");
+        KS(@"");
+        
+        struct sigaction sa;
+        sa.sa_sigaction = ks_crash_handler;
+        sa.sa_flags = SA_SIGINFO;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, NULL);
+        sigaction(SIGBUS, &sa, NULL);
+        sigaction(SIGILL, &sa, NULL);
+        sigaction(SIGABRT, &sa, NULL);
+        NSSetUncaughtExceptionHandler(ks_exception_handler);
+        KS(@"[INIT] 崩溃捕获已启用");
         
         Class actVC = objc_getClass("WWWActivationViewController");
-        if (actVC) hookActivationVC(actVC);
-        else KFA(@"[INIT] ⚠️ WWWActivationViewController not found, will retry in 3s");
+        if (actVC) {
+            hookOnTapVerify(actVC);
+            hookActivateCode(actVC);
+            hookVerifyWithCompletion(actVC);
+            hookShowSuccess(actVC);
+            hookSetupAfterActivation(actVC);
+            hookStartContinuousAuthCheck(actVC);
+        } else {
+            KS(@"[INIT] ⚠️ WWWActivationViewController not found, retrying...");
+        }
         
         Class mainVC = objc_getClass("ViewController");
-        if (mainVC) hookViewController(mainVC);
-        else KFA(@"[INIT] ⚠️ ViewController not found, will retry in 3s");
-        
-        hookNSURLSession();
-        hookNSUserDefaults();
-        hookUIAlertController();
-        hookContinuousAuthCheck();
-        checkLibxpfLoaded();
-        
-        unsigned int imgCount = _dyld_image_count();
-        for (unsigned int i = 0; i < imgCount; i++) {
-            const char *n = _dyld_get_image_name(i);
-            if (strstr(n, "xpf") || strstr(n, "kfun") || strstr(n, "inject") || strstr(n, "substrate") || strstr(n, "Autopsy")) {
-                KFA(@"[IMG] %s", n);
-            }
+        if (mainVC) {
+            hookSetupAfterActivation(mainVC);
+            hookStartContinuousAuthCheck(mainVC);
+        } else {
+            KS(@"[INIT] ⚠️ ViewController not found, retrying...");
         }
         
         if (!actVC || !mainVC) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (!actVC) {
-                    Class retryAct = objc_getClass("WWWActivationViewController");
-                    if (retryAct) { KFA(@"[INIT] Retry: found WWWActivationViewController"); hookActivationVC(retryAct); }
+                    Class retry = objc_getClass("WWWActivationViewController");
+                    if (retry) {
+                        KS(@"[INIT] Retry: WWWActivationViewController");
+                        hookOnTapVerify(retry);
+                        hookActivateCode(retry);
+                        hookVerifyWithCompletion(retry);
+                        hookShowSuccess(retry);
+                        hookSetupAfterActivation(retry);
+                        hookStartContinuousAuthCheck(retry);
+                    }
                 }
                 if (!mainVC) {
-                    Class retryMain = objc_getClass("ViewController");
-                    if (retryMain) { KFA(@"[INIT] Retry: found ViewController"); hookViewController(retryMain); }
+                    Class retry = objc_getClass("ViewController");
+                    if (retry) {
+                        KS(@"[INIT] Retry: ViewController");
+                        hookSetupAfterActivation(retry);
+                        hookStartContinuousAuthCheck(retry);
+                    }
                 }
             });
         }
