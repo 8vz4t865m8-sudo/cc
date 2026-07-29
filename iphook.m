@@ -1,7 +1,6 @@
 //
-//  iphook.m - v18 最终暴力模拟版
-//  原理：拦截原App验证，然后模仿KfunHook的成功路径
-//  方法：直接调用KfunHook的setupAfterActivation（如果存在），否则暴力刷新所有视图
+//  iphook_safe.m - KFun Bypass v13 Safe
+//  只绕过验证+加载主页面，不自动启动 exploit/read
 //
 
 #import <UIKit/UIKit.h>
@@ -10,19 +9,28 @@
 
 #define LOG(fmt, ...) logLine([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
-// ---------- 悬浮窗 ----------
 static UITextView *g_logView = nil;
 static UIView *g_logContainer = nil;
 static NSMutableString *g_logBuffer = nil;
+
 static void logLine(NSString *msg) {
     NSString *line = [NSString stringWithFormat:@"[%.0f] %@", [[NSDate date] timeIntervalSince1970], msg];
-    NSLog(@"[KFunV18] %@", line);
+    NSLog(@"[KFunSafe] %@", line);
     if (!g_logBuffer) g_logBuffer = [[NSMutableString alloc] init];
     [g_logBuffer appendFormat:@"%@\n", line];
-    if (g_logBuffer.length > 20000) [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 20000)];
-    dispatch_async(dispatch_get_main_queue(), ^{ if (g_logView) { g_logView.text = g_logBuffer; [g_logView scrollRangeToVisible:NSMakeRange(g_logBuffer.length - 1, 1)]; } });
+    if (g_logBuffer.length > 15000) {
+        [g_logBuffer deleteCharactersInRange:NSMakeRange(0, g_logBuffer.length - 15000)];
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_logView) {
+            g_logView.text = g_logBuffer;
+            [g_logView scrollRangeToVisible:NSMakeRange(g_logBuffer.length - 1, 1)];
+        }
+    });
 }
-@interface LogDragHandler : NSObject @end
+
+@interface LogDragHandler : NSObject
+@end
 @implementation LogDragHandler
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     UIView *view = pan.view.superview;
@@ -58,7 +66,7 @@ static void setupLogWindow() {
         }
         if (!keyWindow) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupLogWindow(); }); return; }
         
-        CGFloat w = 350, h = 300;
+        CGFloat w = 350, h = 320;
         g_logContainer = [[UIView alloc] initWithFrame:CGRectMake(8, 100, w, h)];
         g_logContainer.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.93];
         g_logContainer.layer.cornerRadius = 10;
@@ -70,7 +78,7 @@ static void setupLogWindow() {
         [g_logContainer addSubview:titleBar];
         
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, w-80, 22)];
-        title.text = @"🔍 KFun v18 暴力模拟 (拖动)";
+        title.text = @"🔍 KFun Safe (拖动)";
         title.textColor = [UIColor cyanColor];
         title.font = [UIFont boldSystemFontOfSize:10];
         [titleBar addSubview:title];
@@ -96,271 +104,367 @@ static void setupLogWindow() {
         [titleBar addGestureRecognizer:pan];
         
         [keyWindow addSubview:g_logContainer];
-        LOG(@"✅ v18 暴力模拟已启动");
+        LOG(@"✅ 悬浮窗已启动");
     });
 }
 
-// ---------- 工具：打印对象属性 ----------
-static void snapshotProperties(id obj, NSString *label) {
-    if (!obj) { LOG(@"❌ %@ nil", label); return; }
-    LOG(@"📸 [%@] begin", label);
-    unsigned int count = 0;
-    objc_property_t *props = class_copyPropertyList(object_getClass(obj), &count);
-    for (unsigned int i = 0; i < count; i++) {
-        NSString *name = [NSString stringWithUTF8String:property_getName(props[i])];
-        @try {
-            id val = [obj valueForKey:name];
-            NSString *desc = val ? [val description] : @"nil";
-            if (desc.length > 100) desc = [desc substringToIndex:100];
-            LOG(@"   %@ = %@", name, desc);
-        } @catch (NSException *e) {
-            LOG(@"   %@ = [err:%@]", name, e.reason);
-        }
-    }
-    if (props) free(props);
-    LOG(@"📸 [%@] end", label);
-}
-
-// ---------- 暴力刷新主界面 ----------
-static void forceRefreshMainViewController() {
-    // 1. 写入所有可能的激活状态（覆盖各种key）
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSDictionary *dict = @{
-        @"status": @"ok",
-        @"activationStatus": @"ok",
-        @"activated": @"1",
-        @"isActivated": @YES,
-        @"expires_at": @"2099-12-31 23:59:59",
-        @"expire": @"2099-12-31 23:59:59",
-        @"vip_time": @"2099-12-31 23:59:59"
-    };
-    for (NSString *key in dict) {
-        [defaults setObject:dict[key] forKey:key];
-    }
-    [defaults synchronize];
-    LOG(@"✅ 已写入多个激活状态 key");
-
-    // 2. 获取主控制器 ViewController
+// ============================================================
+// 找到真正的 ViewController
+// ============================================================
+static UIViewController *findMainVC() {
     Class mainClass = objc_getClass("ViewController");
-    if (!mainClass) {
-        LOG(@"❌ 未找到 ViewController 类");
-        return;
-    }
-    UIViewController *mainVC = nil;
+    if (!mainClass) return nil;
+    
     for (UIWindow *window in [UIApplication sharedApplication].windows) {
         UIViewController *root = window.rootViewController;
+        if (!root) continue;
+        
+        if ([root isKindOfClass:mainClass]) return root;
+        
         if ([root isKindOfClass:[UITabBarController class]]) {
-            root = [(UITabBarController *)root selectedViewController];
-        }
-        if ([root isKindOfClass:[UINavigationController class]]) {
-            root = [(UINavigationController *)root topViewController];
-        }
-        if ([root isKindOfClass:mainClass]) {
-            mainVC = root;
-            break;
-        }
-        for (UIViewController *child in root.childViewControllers) {
-            if ([child isKindOfClass:mainClass]) {
-                mainVC = child;
-                break;
-            }
-        }
-        if (mainVC) break;
-    }
-    if (!mainVC) {
-        LOG(@"❌ 未找到主控制器实例");
-        return;
-    }
-    LOG(@"🎯 找到主控制器: %@", mainVC);
-    snapshotProperties(mainVC, @"主控制器(激活前)");
-
-    // 3. 尝试调用 KfunHook 的 setupAfterActivation（如果内存中有该实例）
-    // 遍历所有视图控制器，查找 WWWActivationViewController 实例，调用它的 setupAfterActivation
-    for (UIWindow *window in [UIApplication sharedApplication].windows) {
-        UIViewController *root = window.rootViewController;
-        [self traverseViewController:root];
-    }
-    // 如果找到并调用了，就不需要下面的暴力设置了，因为 KfunHook 会帮我们搞定
-    // 但我们还是继续执行暴力刷新，以防万一
-
-    // 4. 设置各种可能的状态属性
-    NSArray *stateKeys = @[@"state", @"status", @"activationStatus", @"isActivated", @"activated", @"isVerified"];
-    for (NSString *key in stateKeys) {
-        @try {
-            [mainVC setValue:@(1) forKey:key];
-            LOG(@"  设置 %@ = 1", key);
-        } @catch (NSException *e) {}
-        @try {
-            [mainVC setValue:@"ok" forKey:key];
-        } @catch (NSException *e) {}
-        @try {
-            [mainVC setValue:@YES forKey:key];
-        } @catch (NSException *e) {}
-    }
-    // 直接修改 _state ivar
-    Ivar stateIvar = class_getInstanceVariable(mainClass, "_state");
-    if (stateIvar) {
-        object_setIvar(mainVC, stateIvar, @(1));
-        LOG(@"  直接设 _state = 1");
-    }
-
-    // 5. 调用所有可能的刷新方法
-    NSArray *refreshMethods = @[
-        @"reloadData", @"refreshData", @"loadData", @"updateData",
-        @"setup", @"setupUI", @"refreshUI", @"updateUI",
-        @"loadContent", @"refreshContent", @"fetchData",
-        @"viewDidLoad", @"viewWillAppear:", @"viewDidAppear:",
-        @"startRadar", @"startLoading", @"initialize",
-        @"reloadTableView", @"refreshTableView"
-    ];
-    for (NSString *methodName in refreshMethods) {
-        SEL sel = NSSelectorFromString(methodName);
-        if ([mainVC respondsToSelector:sel]) {
-            @try {
-                // 处理带参数的方法 (viewWillAppear: 等)
-                if ([methodName hasSuffix:@":"]) {
-                    [mainVC performSelector:sel withObject:@(YES)];
-                } else {
-                    [mainVC performSelector:sel];
+            UITabBarController *tab = (UITabBarController *)root;
+            for (UIViewController *vc in tab.viewControllers) {
+                if ([vc isKindOfClass:mainClass]) return vc;
+                if ([vc isKindOfClass:[UINavigationController class]]) {
+                    UINavigationController *nav = (UINavigationController *)vc;
+                    for (UIViewController *child in nav.viewControllers) {
+                        if ([child isKindOfClass:mainClass]) return child;
+                    }
                 }
-                LOG(@"  调用 [%@] 成功", methodName);
-            } @catch (NSException *e) {
-                LOG(@"  调用 [%@] 异常: %@", methodName, e.reason);
             }
         }
-    }
-
-    // 6. 刷新所有 UITableView 和 UICollectionView
-    [self refreshAllTableAndCollectionViewsInView:mainVC.view];
-
-    // 7. 发送通知
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ActivationSuccessNotification" object:nil];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"kActivationDidComplete" object:nil];
-    LOG(@"📢 已发送激活成功通知");
-
-    // 8. 延迟再次刷新
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self refreshAllTableAndCollectionViewsInView:mainVC.view];
-        [mainVC.view setNeedsLayout];
-        [mainVC.view layoutIfNeeded];
-        LOG(@"✅ 二次刷新完成");
-        snapshotProperties(mainVC, @"主控制器(激活后)");
-    });
-}
-
-// 辅助：遍历视图控制器，尝试调用 KfunHook 的 setupAfterActivation
-static void traverseViewController(UIViewController *vc) {
-    if (!vc) return;
-    if ([vc isKindOfClass:objc_getClass("WWWActivationViewController")]) {
-        if ([vc respondsToSelector:@selector(setupAfterActivation)]) {
-            LOG(@"🎯 找到 WWWActivationViewController，调用 setupAfterActivation");
-            [vc performSelector:@selector(setupAfterActivation)];
-            LOG(@"✅ 已调用 setupAfterActivation");
+        
+        if ([root isKindOfClass:[UINavigationController class]]) {
+            UINavigationController *nav = (UINavigationController *)root;
+            for (UIViewController *vc in nav.viewControllers) {
+                if ([vc isKindOfClass:mainClass]) return vc;
+            }
         }
+        
+        UIViewController *presented = root.presentedViewController;
+        if ([presented isKindOfClass:mainClass]) return presented;
     }
-    for (UIViewController *child in vc.childViewControllers) {
-        traverseViewController(child);
-    }
-    if (vc.presentedViewController) {
-        traverseViewController(vc.presentedViewController);
-    }
+    return nil;
 }
 
-// 辅助：刷新所有表格和集合视图
-static void refreshAllTableAndCollectionViewsInView(UIView *view) {
-    if (!view) return;
-    if ([view isKindOfClass:[UITableView class]]) {
-        [(UITableView *)view reloadData];
-        LOG(@"🔄 刷新 UITableView: %@", view);
-    } else if ([view isKindOfClass:[UICollectionView class]]) {
-        [(UICollectionView *)view reloadData];
-        LOG(@"🔄 刷新 UICollectionView: %@", view);
-    }
-    for (UIView *subview in view.subviews) {
-        refreshAllTableAndCollectionViewsInView(subview);
-    }
-}
-
-// ---------- 拦截原App验证（如弹窗、按钮） ----------
-static void doBypass(id vcInstance) {
-    LOG(@"🚀 拦截激活请求，执行暴力模拟");
-
-    // 隐藏激活界面元素（如果存在）
+// ============================================================
+// ⭐ 安全初始化：只加载UI，不启动 exploit/read
+// ============================================================
+static void initActivationVC(id actVC) {
+    if (!actVC) return;
+    LOG(@"🔧 初始化 ActivationVC（仅UI，不启动内存读取）");
+    
+    // 1. 调用 setupAfterActivation（激活后初始化）
     @try {
-        id spinner = [vcInstance valueForKey:@"spinner"];
+        if ([actVC respondsToSelector:@selector(setupAfterActivation)]) {
+            [actVC performSelector:@selector(setupAfterActivation)];
+            LOG(@"✅ setupAfterActivation");
+        }
+    } @catch (NSException *e) { LOG(@"❌ setupAfterActivation: %@", e.reason); }
+    
+    // 2. 调用 buildUI（构建主页面 UI）
+    @try {
+        if ([actVC respondsToSelector:@selector(buildUI)]) {
+            [actVC performSelector:@selector(buildUI)];
+            LOG(@"✅ buildUI");
+        }
+    } @catch (NSException *e) { LOG(@"❌ buildUI: %@", e.reason); }
+    
+    // 3. 启动持续验证心跳（让 app 认为一直有效）
+    @try {
+        if ([actVC respondsToSelector:@selector(startContinuousAuthCheck)]) {
+            [actVC performSelector:@selector(startContinuousAuthCheck)];
+            LOG(@"✅ startContinuousAuthCheck");
+        }
+    } @catch (NSException *e) { LOG(@"❌ startContinuousAuthCheck: %@", e.reason); }
+    
+    // 4. 调用 transitionTo: 切换到主页面
+    @try {
+        if ([actVC respondsToSelector:@selector(transitionTo:)]) {
+            [actVC performSelector:@selector(transitionTo:) withObject:@"main"];
+            LOG(@"✅ transitionTo:main");
+        }
+    } @catch (NSException *e) { LOG(@"❌ transitionTo: %@", e.reason); }
+}
+
+// ============================================================
+// ⭐ 安全初始化主页面：只设置状态，不自动启动 exploit/read
+// ============================================================
+static void initMainVC(UIViewController *mainVC) {
+    if (!mainVC) { LOG(@"❌ MainVC nil"); return; }
+    LOG(@"🔧 初始化 MainVC（仅UI状态，不启动内存读取）");
+    
+    // 只设置状态文本，不调用 exploit/read
+    @try {
+        if ([mainVC respondsToSelector:@selector(setStatusText:)]) {
+            [mainVC performSelector:@selector(setStatusText:) withObject:@"已连接（等待启动）"];
+            LOG(@"✅ setStatusText");
+        }
+        if ([mainVC respondsToSelector:@selector(setDataText:)]) {
+            [mainVC performSelector:@selector(setDataText:) withObject:@"请点击功能按钮启动"];
+            LOG(@"✅ setDataText");
+        }
+    } @catch (NSException *e) { LOG(@"❌ 设置文本: %@", e.reason); }
+    
+    // 后台保活可以开，这个安全
+    @try {
+        if ([mainVC respondsToSelector:@selector(setupBackgroundKeepAlive)]) {
+            [mainVC performSelector:@selector(setupBackgroundKeepAlive)];
+            LOG(@"✅ setupBackgroundKeepAlive");
+        }
+    } @catch (NSException *e) { LOG(@"❌ setupBackgroundKeepAlive: %@", e.reason); }
+    
+    LOG(@"⚠️ exploit/read 未自动启动，需用户手动点击");
+}
+
+// ============================================================
+// Bypass 执行
+// ============================================================
+static void doBypass(id actVC) {
+    LOG(@"🚀 Bypass 开始（安全模式）");
+    if (!actVC) { LOG(@"❌ actVC nil"); return; }
+    
+    // 1. 停止 spinner
+    @try {
+        id spinner = [actVC valueForKey:@"spinner"];
         if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
             [(UIActivityIndicatorView *)spinner stopAnimating];
             [(UIActivityIndicatorView *)spinner setHidden:YES];
+            LOG(@"✅ spinner 停止");
         }
-        id errorLabel = [vcInstance valueForKey:@"errorLabel"];
+    } @catch (NSException *e) {}
+    
+    // 2. 隐藏错误标签
+    @try {
+        id errorLabel = [actVC valueForKey:@"errorLabel"];
         if (errorLabel && [errorLabel isKindOfClass:[UIView class]]) {
             [(UIView *)errorLabel setHidden:YES];
         }
-        id mask = [vcInstance valueForKey:@"authMaskView"];
+    } @catch (NSException *e) {}
+    
+    // 3. 移除认证遮罩
+    @try {
+        id mask = [actVC valueForKey:@"authMaskView"];
         if (mask && [mask isKindOfClass:[UIView class]]) {
             [(UIView *)mask setHidden:YES];
             [(UIView *)mask removeFromSuperview];
+            LOG(@"✅ authMaskView 移除");
         }
-        LOG(@"✅ 已清理激活界面");
     } @catch (NSException *e) {}
-
-    // 执行暴力刷新
-    forceRefreshMainViewController();
-
-    // 延迟关闭激活控制器
+    
+    // 4. 初始化激活页（setupAfterActivation + buildUI + transitionTo）
+    initActivationVC(actVC);
+    
+    // 5. 调用 showSuccess:completion:
+    @try {
+        if ([actVC respondsToSelector:@selector(showSuccess:completion:)]) {
+            id completionBlock = ^(void) {
+                LOG(@"🎉 showSuccess completion 执行");
+            };
+            [actVC performSelector:@selector(showSuccess:completion:) 
+                        withObject:@"到期时间:2099-12-31 23:59:59" 
+                        withObject:completionBlock];
+            LOG(@"✅ showSuccess:completion: 已调用");
+        }
+    } @catch (NSException *e) { LOG(@"❌ showSuccess:completion: %@", e.reason); }
+    
+    // 6. 延迟后初始化主页面（只设置状态，不启动 exploit）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *mainVC = findMainVC();
+        if (mainVC) {
+            initMainVC(mainVC);
+        } else {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIViewController *retryVC = findMainVC();
+                if (retryVC) initMainVC(retryVC);
+            });
+        }
+    });
+    
+    // 7. dismiss 激活页面
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            if ([vcInstance isKindOfClass:[UIViewController class]]) {
-                UIViewController *vc = (UIViewController *)vcInstance;
+            if ([actVC isKindOfClass:[UIViewController class]]) {
+                UIViewController *vc = (UIViewController *)actVC;
                 if (vc.presentingViewController) {
-                    [vc dismissViewControllerAnimated:NO completion:^{
-                        LOG(@"✅ 激活页面已关闭");
-                    }];
+                    [vc dismissViewControllerAnimated:NO completion:nil];
+                    LOG(@"✅ dismiss 完成");
+                } else if (vc.navigationController) {
+                    [vc.navigationController popViewControllerAnimated:NO];
+                    LOG(@"✅ popViewController 完成");
                 }
             }
         } @catch (NSException *e) {}
     });
 }
 
-// ---------- Hook 入口 ----------
+// ============================================================
+// Hook 入口
+// ============================================================
 static void hookActivationVC(Class cls) {
-    if (!cls) { LOG(@"❌ 未找到激活控制器类"); return; }
+    if (!cls) { LOG(@"❌ 未找到 WWWActivationViewController"); return; }
     LOG(@"🎣 Hook: %s", class_getName(cls));
+    Method m;
     
-    Method m = class_getInstanceMethod(cls, @selector(onTapVerify));
+    // 1. Hook viewDidLoad
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [ActVC] viewDidLoad");
+            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                @try {
+                    id isAct = [self valueForKey:@"isActivated"];
+                    if (![isAct boolValue]) {
+                        LOG(@"⚡ 自动触发 bypass（未激活状态）");
+                        doBypass(self);
+                    }
+                } @catch (NSException *e) {}
+            });
+        });
+        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
+        LOG(@"  ✅ viewDidLoad");
+    }
+    
+    // 2. ⭐ Hook verifyWithCompletion:（核心）
+    m = class_getInstanceMethod(cls, NSSelectorFromString(@"verifyWithCompletion:"));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, id completion) {
+            LOG(@"🎯 verifyWithCompletion: 拦截");
+            if (completion) {
+                @try {
+                    NSDictionary *fakeData = @{
+                        @"success": @YES,
+                        @"message": @"ok",
+                        @"data": @{
+                            @"expires_at": @"2099-12-31T23:59:59Z",
+                            @"vip_time": @"2099-12-31"
+                        }
+                    };
+                    void (^compBlock)(id) = (void (^)(id))completion;
+                    compBlock(fakeData);
+                    LOG(@"✅ completion 已调用");
+                } @catch (NSException *e) {
+                    @try {
+                        void (^compBlock)(void) = (void (^)(void))completion;
+                        compBlock();
+                    } @catch (NSException *e2) {}
+                }
+            }
+            doBypass(self);
+        });
+        class_replaceMethod(cls, NSSelectorFromString(@"verifyWithCompletion:"), newIMP, typeEnc);
+        LOG(@"  ✅ verifyWithCompletion:");
+    }
+    
+    // 3. Hook onTapVerify
+    m = class_getInstanceMethod(cls, NSSelectorFromString(@"onTapVerify"));
     if (m) {
         const char *typeEnc = method_getTypeEncoding(m);
         IMP newIMP = imp_implementationWithBlock(^(id self) {
             LOG(@"🎯 onTapVerify 拦截");
             doBypass(self);
         });
-        class_replaceMethod(cls, @selector(onTapVerify), newIMP, typeEnc);
+        class_replaceMethod(cls, NSSelectorFromString(@"onTapVerify"), newIMP, typeEnc);
         LOG(@"  ✅ onTapVerify");
     }
     
+    // 4. Hook showError:
     m = class_getInstanceMethod(cls, @selector(showError:));
     if (m) {
         const char *typeEnc = method_getTypeEncoding(m);
         IMP newIMP = imp_implementationWithBlock(^(id self, NSString *msg) {
-            LOG(@"🛡️ showError 拦截 -> 转为绕过");
+            LOG(@"🛡️ showError 拦截: %@", msg);
             doBypass(self);
         });
         class_replaceMethod(cls, @selector(showError:), newIMP, typeEnc);
         LOG(@"  ✅ showError:");
     }
     
-    // 强制 isActivated / isVerified 返回 YES
-    NSArray *selNames = @[@"isActivated", @"isVerified"];
-    for (NSString *selName in selNames) {
+    // 5. Hook isActivated → YES
+    m = class_getInstanceMethod(cls, @selector(isActivated));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) { return YES; });
+        class_replaceMethod(cls, @selector(isActivated), newIMP, typeEnc);
+        LOG(@"  ✅ isActivated -> YES");
+    }
+    
+    // 6. Hook isVerified → YES
+    m = class_getInstanceMethod(cls, NSSelectorFromString(@"isVerified"));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) { return YES; });
+        class_replaceMethod(cls, NSSelectorFromString(@"isVerified"), newIMP, typeEnc);
+        LOG(@"  ✅ isVerified -> YES");
+    }
+    
+    // 7. Hook setStatus: 拦截错误
+    m = class_getInstanceMethod(cls, NSSelectorFromString(@"setStatus:"));
+    if (m) {
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, id status) {
+            LOG(@"🛡️ setStatus: 拦截 -> %@", status);
+            if ([status isKindOfClass:[NSString class]] && 
+                ([status containsString:@"error"] || [status containsString:@"失败"])) {
+                doBypass(self);
+            }
+        });
+        class_replaceMethod(cls, NSSelectorFromString(@"setStatus:"), newIMP, typeEnc);
+        LOG(@"  ✅ setStatus:");
+    }
+}
+
+static void hookViewController(Class cls) {
+    if (!cls) { LOG(@"❌ 未找到 ViewController"); return; }
+    LOG(@"🎣 Hook MainVC: %s", class_getName(cls));
+    Method m;
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self) {
+            LOG(@"🎯 [MainVC] viewDidLoad");
+            ((void (*)(id, SEL))orig)(self, @selector(viewDidLoad));
+            // 只设置状态，不启动 exploit
+            initMainVC(self);
+        });
+        class_replaceMethod(cls, @selector(viewDidLoad), newIMP, typeEnc);
+        LOG(@"  ✅ viewDidLoad");
+    }
+    
+    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        const char *typeEnc = method_getTypeEncoding(m);
+        IMP newIMP = imp_implementationWithBlock(^(id self, BOOL animated) {
+            LOG(@"🎯 [MainVC] viewDidAppear:");
+            ((void (*)(id, SEL, BOOL))orig)(self, @selector(viewDidAppear:), animated);
+            initMainVC(self);
+        });
+        class_replaceMethod(cls, @selector(viewDidAppear:), newIMP, typeEnc);
+        LOG(@"  ✅ viewDidAppear:");
+    }
+    
+    // ⭐ 保护 exploit/read 方法，但不在 bypass 时自动调用
+    // 这些留给用户手动点击触发
+    NSArray *methods = @[@"exploitTapped", @"readTapped", @"readLoop"];
+    for (NSString *selName in methods) {
         SEL sel = NSSelectorFromString(selName);
-        Method m2 = class_getInstanceMethod(cls, sel);
-        if (m2) {
-            const char *typeEnc = method_getTypeEncoding(m2);
+        m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            IMP orig = method_getImplementation(m);
+            const char *typeEnc = method_getTypeEncoding(m);
             IMP newIMP = imp_implementationWithBlock(^(id self) {
-                return YES;
+                LOG(@"🎯 [MainVC] %@ 用户手动触发", selName);
+                ((void (*)(id, SEL))orig)(self, sel);
             });
             class_replaceMethod(cls, sel, newIMP, typeEnc);
-            LOG(@"  ✅ %@ -> YES", selName);
+            LOG(@"  ✅ %@ (保护，不自动调用)", selName);
         }
     }
 }
@@ -368,13 +472,23 @@ static void hookActivationVC(Class cls) {
 __attribute__((constructor))
 static void iphook_init() {
     NSLog(@"========================================");
-    NSLog(@"[KFunV18] 暴力模拟最终版加载");
+    NSLog(@"[KFunSafe] v13 安全版已加载（不自动启动 exploit）");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupLogWindow();
+        
         Class actClass = objc_getClass("WWWActivationViewController");
         if (actClass) hookActivationVC(actClass);
-        LOG(@"🚀 v18 初始化完成，点击验证即可尝试加载主界面");
+        
+        Class mainVC = objc_getClass("ViewController");
+        if (mainVC) hookViewController(mainVC);
+        
+        LOG(@"🚀 初始化完成");
+        LOG(@"📋 安全说明：");
+        LOG(@"   • 自动绕过验证 ✅");
+        LOG(@"   • 自动加载主页面 ✅");
+        LOG(@"   • 自动启动 exploit ❌（需手动点击）");
+        LOG(@"   • 自动启动 read ❌（需手动点击）");
     });
 }
