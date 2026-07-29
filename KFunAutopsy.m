@@ -217,7 +217,7 @@ static void ks_initMainVC(id mainVC);
 static void ks_initXPF(void);
 static void ks_postDismissInit(void);
 
-#pragma mark - 补全初始化链
+#pragma mark - 补全初始化链（仅此函数被修改）
 
 static void runFullInitChain(id activationVC) {
     KS(@"[INIT] ⭐ 开始补全初始化链");
@@ -253,20 +253,31 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) { KS(@"[INIT]   buildSuccessViewWithExpire: 异常: %@", e.reason); }
     
+    // ⭐ 核心修正：showSuccess 的 completion 里等 dismiss 后再初始化
     @try {
         if ([activationVC respondsToSelector:@selector(showSuccess:completion:)]) {
             void (^comp)(void) = ^{
-                KS(@"[INIT]   showSuccess completion 执行");
+                KS(@"[INIT]   showSuccess completion 执行（页面应已自动消失）");
+                // 等一小会儿确保 dismiss 动画完成
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    ks_postDismissInit();
+                });
             };
             [activationVC performSelector:@selector(showSuccess:completion:) withObject:@"到期时间:2099-12-31 23:59:59" withObject:comp];
-            KS(@"[INIT]   showSuccess:completion: 已调用");
+            KS(@"[INIT]   showSuccess:completion: 已调用（等待 2 秒自动消失）");
+        } else {
+            // 如果没有 showSuccess，直接初始化
+            KS(@"[INIT]   showSuccess 不存在，直接初始化");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ks_postDismissInit();
+            });
         }
-    } @catch (NSException *e) { KS(@"[INIT]   showSuccess:completion: 异常: %@", e.reason); }
-    
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        KS(@"[INIT]   延迟初始化开始...");
-        ks_postDismissInit();
-    });
+    } @catch (NSException *e) { 
+        KS(@"[INIT]   showSuccess:completion: 异常: %@", e.reason);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ks_postDismissInit();
+        });
+    }
 }
 
 static id ks_findMainVC(void) {
