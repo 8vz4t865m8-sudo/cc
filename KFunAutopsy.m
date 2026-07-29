@@ -186,8 +186,6 @@ static void logStack(int skip, int max) {
 #pragma mark - 伪造验证数据
 
 static NSDictionary *buildFakeResponse(void) {
-    // 基于 KfunHook 情报构造的响应结构
-    // 包含所有已知字段，值合理猜测
     return @{
         @"success": @YES,
         @"message": @"激活成功",
@@ -215,12 +213,14 @@ static void injectFakeState(void) {
     KS(@"[FAKE] 已注入伪造验证状态");
 }
 
-#pragma mark - 补全初始化链
+#pragma mark - 补全初始化链（前向声明）
+
+static void ks_postDismissInit(void);
+static void ks_initXPF(void);
 
 static void runFullInitChain(id activationVC) {
     KS(@"[INIT] ⭐ 开始补全初始化链");
     
-    // 1. 停止 spinner
     @try {
         id spinner = [activationVC valueForKey:@"spinner"];
         if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
@@ -230,13 +230,11 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) {}
     
-    // 2. 隐藏 errorLabel
     @try {
         id err = [activationVC valueForKey:@"errorLabel"];
         if (err && [err isKindOfClass:[UIView class]]) [(UIView *)err setHidden:YES];
     } @catch (NSException *e) {}
     
-    // 3. 移除遮罩
     @try {
         id mask = [activationVC valueForKey:@"authMaskView"];
         if (mask && [mask isKindOfClass:[UIView class]]) {
@@ -246,20 +244,17 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) {}
     
-    // 4. 调用 buildSuccessViewWithExpire:
     @try {
         if ([activationVC respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
-            // 构造一个 NSDate 对象传入（破解版传的是字符串，这是错误之一）
             NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
             fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
             NSDate *expire = [fmt dateFromString:@"2099-12-31 23:59:59"];
-            if (!expire) expire = [NSDate dateWithTimeIntervalSince1970:4102444799]; // 2099-12-31
+            if (!expire) expire = [NSDate dateWithTimeIntervalSince1970:4102444799];
             [activationVC performSelector:@selector(buildSuccessViewWithExpire:) withObject:expire];
             KS(@"[INIT]   buildSuccessViewWithExpire: 已调用 (%@)", expire);
         }
     } @catch (NSException *e) { KS(@"[INIT]   buildSuccessViewWithExpire: 异常: %@", e.reason); }
     
-    // 5. 调用 showSuccess:completion:（如果存在）
     @try {
         if ([activationVC respondsToSelector:@selector(showSuccess:completion:)]) {
             void (^comp)(void) = ^{
@@ -270,41 +265,35 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) { KS(@"[INIT]   showSuccess:completion: 异常: %@", e.reason); }
     
-    // 6. 延迟执行后续初始化（给 dismiss 时间）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         KS(@"[INIT]   延迟初始化开始...");
-        
-        // 6a. 尝试 dismiss
         @try {
             if ([activationVC isKindOfClass:[UIViewController class]]) {
                 UIViewController *vc = (UIViewController *)activationVC;
                 if (vc.presentingViewController) {
                     [vc dismissViewControllerAnimated:NO completion:^{
                         KS(@"[INIT]   dismiss 完成");
-                        [self _ks_postDismissInit];
+                        ks_postDismissInit();
                     }];
                 } else {
-                    [self _ks_postDismissInit];
+                    ks_postDismissInit();
                 }
             } else {
-                [self _ks_postDismissInit];
+                ks_postDismissInit();
             }
         } @catch (NSException *e) {
             KS(@"[INIT]   dismiss 异常: %@", e.reason);
-            [self _ks_postDismissInit];
+            ks_postDismissInit();
         }
     });
 }
 
-// 延迟初始化（dismiss 后执行）
-+ (void)_ks_postDismissInit {
-    // 找到主页 ViewController
+static void ks_postDismissInit(void) {
     Class mainClass = objc_getClass("ViewController");
     __block id mainVC = nil;
     for (UIWindow *window in [UIApplication sharedApplication].windows) {
         UIViewController *root = window.rootViewController;
         if ([root isKindOfClass:mainClass]) { mainVC = root; break; }
-        // 也可能在导航控制器里
         if ([root isKindOfClass:[UINavigationController class]]) {
             UINavigationController *nav = (UINavigationController *)root;
             for (UIViewController *vc in nav.viewControllers) {
@@ -320,7 +309,6 @@ static void runFullInitChain(id activationVC) {
     }
     KS(@"[INIT]   找到主页: %@", mainVC);
     
-    // 7. 调用 setupAfterActivation
     @try {
         if ([mainVC respondsToSelector:@selector(setupAfterActivation)]) {
             [mainVC performSelector:@selector(setupAfterActivation)];
@@ -330,7 +318,6 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) { KS(@"[INIT]   ❌ setupAfterActivation 异常: %@", e.reason); }
     
-    // 8. 调用 setupBackgroundKeepAlive
     @try {
         if ([mainVC respondsToSelector:@selector(setupBackgroundKeepAlive)]) {
             [mainVC performSelector:@selector(setupBackgroundKeepAlive)];
@@ -338,7 +325,6 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) { KS(@"[INIT]   ❌ setupBackgroundKeepAlive 异常: %@", e.reason); }
     
-    // 9. 调用 startContinuousAuthCheck
     @try {
         if ([mainVC respondsToSelector:@selector(startContinuousAuthCheck)]) {
             [mainVC performSelector:@selector(startContinuousAuthCheck)];
@@ -348,7 +334,6 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) { KS(@"[INIT]   ❌ startContinuousAuthCheck 异常: %@", e.reason); }
     
-    // 10. 刷新 tableView
     @try {
         id tv = [mainVC valueForKey:@"tableView"];
         if (tv && [tv isKindOfClass:[UITableView class]]) {
@@ -357,11 +342,10 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) { KS(@"[INIT]   ❌ tableView 刷新异常: %@", e.reason); }
     
-    // 11. 尝试 XPF 初始化
-    [self _ks_initXPF];
+    ks_initXPF();
 }
 
-+ (void)_ks_initXPF {
+static void ks_initXPF(void) {
     KS(@"[XPF] 尝试初始化...");
     unsigned int count = _dyld_image_count();
     void *handle = NULL;
@@ -375,7 +359,6 @@ static void runFullInitChain(id activationVC) {
     }
     if (!handle) { KS(@"[XPF] ❌ libxpf not loaded"); return; }
     
-    // 尝试所有可能的符号
     const char *syms[] = {
         "init", "start", "run", "open", "setup", "config",
         "xpf_init", "xpf_start", "xpf_run", "xpf_open", "xpf_setup",
@@ -396,7 +379,6 @@ static void runFullInitChain(id activationVC) {
     }
     if (found == 0) KS(@"[XPF]   所有符号均未找到（已被 strip）");
     
-    // 如果符号被 strip，尝试通过 Objective-C runtime 找类
     int numClasses = objc_getClassList(NULL, 0);
     if (numClasses > 0) {
         Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
@@ -405,7 +387,6 @@ static void runFullInitChain(id activationVC) {
             const char *name = class_getName(classes[i]);
             if (strstr(name, "xpf") || strstr(name, "XPF") || strstr(name, "kfd") || strstr(name, "KFD")) {
                 KS(@"[XPF]   发现相关类: %s", name);
-                // 打印方法列表
                 unsigned int mc = 0;
                 Method *methods = class_copyMethodList(classes[i], &mc);
                 for (unsigned int j = 0; j < mc; j++) {
@@ -429,28 +410,8 @@ static void hookOnTapVerify(Class cls) {
     IMP newIMP = imp_implementationWithBlock(^void(id self) {
         KS(@"[ACT] ⭐ onTapVerify 拦截 — 开始自主验证");
         logStack(0, 3);
-        
-        // 1. 注入伪造状态
         injectFakeState();
-        
-        // 2. 构造假响应，直接调用 activateCode:completion: 的 completion
-        // 如果原版 activateCode:completion: 存在，我们模拟它的成功回调
-        if ([self respondsToSelector:@selector(activateCode:completion:)]) {
-            KS(@"[ACT]   通过 activateCode:completion: 注入");
-            NSDictionary *fakeData = buildFakeResponse();
-            void (^fakeCompletion)(BOOL, id) = ^(BOOL success, id data) {
-                KS(@"[ACT]   伪造 completion 被调用 success=%d", success);
-                // 原版 completion 里应该会调用 showSuccess
-                // 我们同时启动补全链
-                runFullInitChain(self);
-            };
-            // 直接调用原版方法，但传入假 completion？不，我们直接执行假 completion
-            // 因为原版方法会发送网络请求，我们不想等
-            fakeCompletion(YES, fakeData);
-        } else {
-            KS(@"[ACT]   activateCode:completion: 不存在，直接走补全链");
-            runFullInitChain(self);
-        }
+        runFullInitChain(self);
     });
     method_setImplementation(m, newIMP);
 }
@@ -464,21 +425,13 @@ static void hookActivateCode(Class cls) {
     IMP newIMP = imp_implementationWithBlock(^void(id self, NSString *code, void (^completion)(BOOL, id)) {
         KS(@"[ACT] ⭐ activateCode: 拦截 — 跳过网络，直接返回成功");
         logStack(0, 3);
-        
         injectFakeState();
         NSDictionary *fakeData = buildFakeResponse();
-        
-        // 先走原版（如果它内部有我们需要的状态设置）
-        // 但替换 completion 为我们的包装版本
         void (^wrapped)(BOOL, id) = ^(BOOL success, id data) {
-            KS(@"[ACT]   原版 completion 被触发（或被我们替换）");
+            KS(@"[ACT]   原版 completion 被触发");
             if (completion) completion(YES, fakeData);
         };
-        
-        // 直接调用 completion，不发送网络请求
         wrapped(YES, fakeData);
-        
-        // 同时启动补全链
         runFullInitChain(self);
     });
     method_setImplementation(m, newIMP);
