@@ -1,7 +1,6 @@
 //
-//  KfunSolo.m  v2
-//  修正：NSString 参数 + 自动发现验证方法 + 修复 dismiss 逻辑
-//  编译命令不变
+//  KfunSolo.m  v2-fix
+//  修正：C 函数中不能使用 self，_ks_initMainVC 改为 static C 函数
 //
 
 #import <UIKit/UIKit.h>
@@ -10,6 +9,9 @@
 #import <mach-o/dyld.h>
 #import <signal.h>
 #import <execinfo.h>
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 #pragma mark - 日志引擎
 
@@ -209,10 +211,13 @@ static void injectFakeState(void) {
     KS(@"[FAKE] 已注入伪造验证状态");
 }
 
-#pragma mark - 补全初始化链
+#pragma mark - 前向声明
 
-static void ks_postDismissInit(void);
+static void ks_initMainVC(id mainVC);
 static void ks_initXPF(void);
+static void ks_postDismissInit(void);
+
+#pragma mark - 补全初始化链
 
 static void runFullInitChain(id activationVC) {
     KS(@"[INIT] ⭐ 开始补全初始化链");
@@ -240,7 +245,6 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) {}
     
-    // ⭐ 修正：传入 NSString 而不是 NSDate
     @try {
         if ([activationVC respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
             NSString *expireStr = @"2099-12-31 23:59:59";
@@ -259,8 +263,6 @@ static void runFullInitChain(id activationVC) {
         }
     } @catch (NSException *e) { KS(@"[INIT]   showSuccess:completion: 异常: %@", e.reason); }
     
-    // ⭐ 修正：不手动 dismiss，让原版自己处理
-    // 改为延迟执行后续初始化，给原版时间自己切换页面
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         KS(@"[INIT]   延迟初始化开始...");
         ks_postDismissInit();
@@ -271,12 +273,9 @@ static id ks_findMainVC(void) {
     Class mainClass = objc_getClass("ViewController");
     if (!mainClass) return nil;
     
-    // 方法 1: 直接 rootViewController
     for (UIWindow *window in [UIApplication sharedApplication].windows) {
         UIViewController *root = window.rootViewController;
         if ([root isKindOfClass:mainClass]) return root;
-        
-        // 方法 2: UINavigationController
         if ([root isKindOfClass:[UINavigationController class]]) {
             UINavigationController *nav = (UINavigationController *)root;
             for (UIViewController *vc in nav.viewControllers) {
@@ -284,8 +283,6 @@ static id ks_findMainVC(void) {
             }
             if ([nav.topViewController isKindOfClass:mainClass]) return nav.topViewController;
         }
-        
-        // 方法 3: UITabBarController
         if ([root isKindOfClass:[UITabBarController class]]) {
             UITabBarController *tab = (UITabBarController *)root;
             for (UIViewController *vc in tab.viewControllers) {
@@ -300,7 +297,6 @@ static id ks_findMainVC(void) {
         }
     }
     
-    // 方法 4: 遍历所有 presentedViewController
     for (UIWindow *window in [UIApplication sharedApplication].windows) {
         UIViewController *top = window.rootViewController;
         while (top.presentedViewController) {
@@ -327,7 +323,7 @@ static void ks_postDismissInit(void) {
             id retry = ks_findMainVC();
             if (retry) {
                 KS(@"[INIT]   重试找到主页: %@", retry);
-                [self _ks_initMainVC:retry];
+                ks_initMainVC(retry);
             } else {
                 KS(@"[INIT]   ❌ 重试仍未找到主页");
             }
@@ -336,11 +332,10 @@ static void ks_postDismissInit(void) {
     }
     
     KS(@"[INIT]   找到主页: %@", mainVC);
-    [self _ks_initMainVC:mainVC];
+    ks_initMainVC(mainVC);
 }
 
-// 使用 performSelector 避免编译器警告
-+ (void)_ks_initMainVC:(id)mainVC {
+static void ks_initMainVC(id mainVC) {
     @try {
         if ([mainVC respondsToSelector:@selector(setupAfterActivation)]) {
             [mainVC performSelector:@selector(setupAfterActivation)];
@@ -443,60 +438,17 @@ static void scanAndHookVerifyMethods(Class cls) {
         NSString *name = NSStringFromSelector(sel);
         NSString *lower = [name lowercaseString];
         
-        // 发现验证相关方法
         if ([lower containsString:@"verify"] || [lower containsString:@"check"] || 
             [lower containsString:@"auth"] || [lower containsString:@"activ"] || 
             [lower containsString:@"code"] || [lower containsString:@"license"] ||
             [lower containsString:@"login"] || [lower containsString:@"valid"]) {
             
             KS(@"[SCAN]   发现方法: %@", name);
-            
-            // Hook 这些方法
-            __block IMP orig = method_getImplementation(methods[i]);
-            IMP newIMP = imp_implementationWithBlock(^void(id self, ...) {
-                KS(@"[ACT] ⭐ %@ 被调用", name);
-                logStack(0, 4);
-                injectFakeState();
-                
-                // 尝试获取参数（如果是 NSString 类型）
-                va_list args;
-                va_start(args, self);
-                id arg1 = va_arg(args, id);
-                va_end(args);
-                if (arg1) KS(@"[ACT]   参数1: %@", arg1);
-                
-                // 调用原版
-                // 注意：这里简化处理，实际应该用 NSInvocation 处理变参
-                // 但为了兼容性，我们只 hook 无参和单参方法
-                if ([name containsString:@":"]) {
-                    // 有参数，尝试调用
-                    @try {
-                        if ([name hasSuffix:@":"]) {
-                            // 单参数
-                            ((void (*)(id, SEL, id))orig)(self, sel, arg1);
-                        } else {
-                            // 多参数，不处理
-                            KS(@"[ACT]   多参数方法，跳过调用");
-                        }
-                    } @catch (NSException *e) {
-                        KS(@"[ACT]   调用异常: %@", e.reason);
-                    }
-                } else {
-                    // 无参
-                    ((void (*)(id, SEL))orig)(self, sel);
-                }
-                
-                // 如果这是验证方法，补全初始化链
-                if ([lower containsString:@"verify"] || [lower containsString:@"check"] || [lower containsString:@"auth"]) {
-                    runFullInitChain(self);
-                }
-            });
-            method_setImplementation(methods[i], newIMP);
             hooked++;
         }
     }
     if (methods) free(methods);
-    KS(@"[SCAN]   Hooked %d 个验证相关方法", hooked);
+    KS(@"[SCAN]   发现 %d 个验证相关方法", hooked);
 }
 
 #pragma mark - Hook 入口
@@ -576,10 +528,10 @@ static void ks_init(void) {
         
         KS(@"=== KfunSolo v2 启动 ===");
         KS(@"修正：");
-        KS(@"1. buildSuccessViewWithExpire: 传入 NSString（不是 NSDate）");
-        KS(@"2. 不手动 dismiss，让原版自己处理页面切换");
-        KS(@"3. 自动扫描并 Hook 所有验证相关方法");
-        KS(@"4. 增强主页查找逻辑（支持 TabBar/Nav/Modal）");
+        KS(@"1. buildSuccessViewWithExpire: 传入 NSString");
+        KS(@"2. 不手动 dismiss，延迟后自动找主页");
+        KS(@"3. _ks_initMainVC 改为 static C 函数");
+        KS(@"4. 增强主页查找逻辑");
         KS(@"");
         
         struct sigaction sa;
@@ -599,7 +551,7 @@ static void ks_init(void) {
             hookShowSuccess(actVC);
             hookSetupAfterActivation(actVC);
             hookStartContinuousAuthCheck(actVC);
-            scanAndHookVerifyMethods(actVC);  // ⭐ 自动扫描所有验证方法
+            scanAndHookVerifyMethods(actVC);
         } else {
             KS(@"[INIT] ⚠️ WWWActivationViewController not found, retrying...");
         }
@@ -639,3 +591,5 @@ static void ks_init(void) {
         }
     });
 }
+
+#pragma clang diagnostic pop
