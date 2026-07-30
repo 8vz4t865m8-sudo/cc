@@ -1,7 +1,10 @@
 //
-//  KfunSolo.m  v3-fix
-//  修正：hook activateCode:completion: 而不是 onTapVerify
-//  让原始 onTapVerify 流程走通，自动 dismiss → 展示 ViewController → 初始化雷达
+//  KfunSolo.m  v5-final
+//  参考 KfunHook 原始 dylib 做法：
+//  1. Hook activateCode:completion: 用 C 函数（不用 block）
+//  2. 不替换 onTapVerify，让原始流程走通
+//  3. 拦截 HTTP 请求，直接回调成功
+//  4. 原始代码自动: dismiss → ViewController → setupAfterActivation → radarCollectLoop
 //
 
 #import <UIKit/UIKit.h>
@@ -89,7 +92,7 @@
         bar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.98];
         [self addSubview:bar];
         UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, W-140, 26)];
-        t.text = @"🚀 KfunSolo v3"; t.font = [UIFont boldSystemFontOfSize:12];
+        t.text = @"🚀 KfunSolo v5"; t.font = [UIFont boldSystemFontOfSize:12];
         t.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.5 alpha:1.0];
         [bar addSubview:t];
         UIButton *cp = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -159,9 +162,18 @@ static void logStack(int skip, int max) {
     for (int i = skip+2; i < MIN((int)syms.count, skip+2+max); i++) KS(@"  ↳ %@", syms[i]);
 }
 
-#pragma mark - 伪造验证数据
+static void injectFakeState(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:@"DP5372QRM1NK3L7" forKey:@"xTcAwvyFDr9CujLx"];
+    [ud setBool:YES forKey:@"kfun_activated"];
+    [ud setObject:@"2099-12-31T23:59:59Z" forKey:@"expire_date"];
+    [ud setObject:@"951951" forKey:@"appid"];
+    [ud synchronize];
+    KS(@"[FAKE] 已注入伪造验证状态");
+}
 
-static NSDictionary *buildFakeResponse(void) {
+// 构造伪造的服务器响应（和 KfunHook 的 force status=0 一样）
+static NSDictionary *buildFakeServerResponse(void) {
     return @{
         @"success": @YES,
         @"message": @"激活成功",
@@ -179,122 +191,117 @@ static NSDictionary *buildFakeResponse(void) {
     };
 }
 
-static void injectFakeState(void) {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setObject:@"DP5372QRM1NK3L7" forKey:@"xTcAwvyFDr9CujLx"];
-    [ud setBool:YES forKey:@"kfun_activated"];
-    [ud setObject:@"2099-12-31T23:59:59Z" forKey:@"expire_date"];
-    [ud setObject:@"951951" forKey:@"appid"];
-    [ud synchronize];
-    KS(@"[FAKE] 已注入伪造验证状态");
-}
+#pragma mark - 保存原始 IMP
 
-#pragma mark - Hook 入口 — 核心改动
+static IMP g_orig_activateCode = NULL;
+static IMP g_orig_verifyWithCompletion = NULL;
+static IMP g_orig_checkTask = NULL;
+static IMP g_orig_startContinuousAuthCheck = NULL;
+static IMP g_orig_onTapVerify = NULL;
 
-// ✅ Hook activateCode:completion: 而不是 onTapVerify
-// 让 onTapVerify 原始代码正常执行，它内部会调用 activateCode:completion:
-// 我们拦截这个方法，直接回调成功，原始流程就会继续走：dismiss → 展示主页 → 初始化雷达
-static void hookActivateCode(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
-    if (!m) { KS(@"[HOOK] ❌ activateCode:completion: not found"); return; }
-    KS(@"[HOOK] ✅ activateCode:completion:");
+#pragma mark - 核心 Hook 函数（C 函数，不用 block）
+
+// ⚡ 这是 KfunHook 的核心做法：
+// 用 C 函数替换 activateCode:completion: 的 IMP
+// 直接调用 completion 回调成功，不发网络请求
+// 原始 onTapVerify 代码会收到成功回调，继续走 dismiss → ViewController → radar
+//
+// activateCode:completion: 的 type encoding: v32@0:8@16@24
+// 即: -(void)activateCode:(NSString *)code completion:(void(^)(BOOL success, id result))completion
+static void kf_hooked_activateCode(id self, SEL _cmd, NSString *code, id completion) {
+    KS(@"[HOOK] ⭐ activateCode:completion: 拦截! code=%@", code);
+    logStack(0, 5);
+    injectFakeState();
     
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^(id self, id code, void (^completion)(BOOL success, id result)) {
-        KS(@"[ACT] ⭐ activateCode 拦截 — code=%@", code);
-        logStack(0, 3);
-        injectFakeState();
-        // 直接回调成功，让 onTapVerify 的原始流程继续执行
-        if (completion) {
-            completion(YES, buildFakeResponse());
-            KS(@"[ACT]   ✅ 已回调 success=YES，原始流程将继续");
-        }
-    });
-    method_setImplementation(m, newIMP);
-}
-
-// ✅ 也 hook verifyWithCompletion: 作为备用
-// 有些版本可能不走 activateCode 而走 verifyWithCompletion
-static void hookVerifyWithCompletion(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
-    if (!m) { KS(@"[HOOK] ⚠️ verifyWithCompletion: not found"); return; }
-    KS(@"[HOOK] ✅ verifyWithCompletion:");
-    
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^(id self, void (^completion)(BOOL)) {
-        KS(@"[ACT] ⭐ verifyWithCompletion 拦截");
-        injectFakeState();
-        if (completion) completion(YES);
-    });
-    method_setImplementation(m, newIMP);
-}
-
-// ✅ Hook checkTask — 防止后台定时验证失败导致退出
-static void hookCheckTask(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(checkTask));
-    if (!m) { KS(@"[HOOK] ⚠️ checkTask not found"); return; }
-    KS(@"[HOOK] ✅ checkTask");
-    
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^void(id self) {
-        KS(@"[AUTH] ⭐ checkTask 拦截 — 跳过验证检查");
-        // 不调用原始实现，直接返回，防止验证失败
-    });
-    method_setImplementation(m, newIMP);
-}
-
-// ✅ Hook startContinuousAuthCheck — 防止持续验证失败
-static void hookStartContinuousAuthCheck(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(startContinuousAuthCheck));
-    if (!m) { KS(@"[HOOK] ⚠️ startContinuousAuthCheck not found"); return; }
-    KS(@"[HOOK] ✅ startContinuousAuthCheck in %s", class_getName(cls));
-    
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^void(id self) {
-        KS(@"[AUTH] ⭐ startContinuousAuthCheck 拦截 — 跳过持续验证");
-        // 不调用原始实现，防止持续验证失败导致退出
-    });
-    method_setImplementation(m, newIMP);
-}
-
-// ✅ Hook setupAfterActivation — 仅用于日志，调用原始实现
-static void hookSetupAfterActivation(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(setupAfterActivation));
-    if (!m) return;
-    KS(@"[HOOK] ✅ setupAfterActivation in %s", class_getName(cls));
-    
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^void(id self) {
-        KS(@"[MAIN] ⭐ setupAfterActivation START (class=%s)", class_getName([self class]));
-        logStack(0, 6);
-        // 调用原始实现！这是初始化雷达的关键
-        ((void (*)(id, SEL))orig)(self, @selector(setupAfterActivation));
-        KS(@"[MAIN]   ✅ setupAfterActivation END");
-    });
-    method_setImplementation(m, newIMP);
-}
-
-#pragma mark - 自动扫描验证方法（仅日志）
-
-static void scanAndLogMethods(Class cls) {
-    KS(@"[SCAN] 扫描 %s 的方法...", class_getName(cls));
-    unsigned int mc = 0;
-    Method *methods = class_copyMethodList(cls, &mc);
-    int found = 0;
-    for (unsigned int i = 0; i < mc; i++) {
-        SEL sel = method_getName(methods[i]);
-        NSString *name = NSStringFromSelector(sel);
-        NSString *lower = [name lowercaseString];
-        if ([lower containsString:@"verify"] || [lower containsString:@"check"] || 
-            [lower containsString:@"auth"] || [lower containsString:@"activ"] || 
-            [lower containsString:@"code"] || [lower containsString:@"setup"] ||
-            [lower containsString:@"radar"] || [lower containsString:@"loop"]) {
-            KS(@"[SCAN]   %@", name);
-            found++;
-        }
+    // completion 是一个 block: void(^)(BOOL success, id result)
+    // 直接调用它，传入成功
+    if (completion) {
+        void (^comp)(BOOL, id) = completion;
+        comp(YES, buildFakeServerResponse());
+        KS(@"[HOOK]   ✅ completion(YES, fakeResponse) 已调用");
+    } else {
+        KS(@"[HOOK]   ⚠️ completion 为 nil");
     }
-    if (methods) free(methods);
-    KS(@"[SCAN]   发现 %d 个相关方法", found);
+}
+
+// 备用: verifyWithCompletion: hook
+// type encoding: v24@0:8@16
+// -(void)verifyWithCompletion:(void(^)(BOOL))completion
+static void kf_hooked_verifyWithCompletion(id self, SEL _cmd, id completion) {
+    KS(@"[HOOK] ⭐ verifyWithCompletion: 拦截!");
+    injectFakeState();
+    if (completion) {
+        void (^comp)(BOOL) = completion;
+        comp(YES);
+    }
+}
+
+// checkTask hook - 阻止后台验证
+static void kf_hooked_checkTask(id self, SEL _cmd) {
+    KS(@"[HOOK] ⭐ checkTask 拦截 — 跳过");
+}
+
+// startContinuousAuthCheck hook - 阻止持续验证
+static void kf_hooked_startContinuousAuthCheck(id self, SEL _cmd) {
+    KS(@"[HOOK] ⭐ startContinuousAuthCheck 拦截 — 跳过");
+}
+
+// onTapVerify hook - 注入假状态 + 调原始实现
+// 这样不管原始 onTapVerify 做什么检查，我们都在前面注入了假状态
+static void kf_hooked_onTapVerify(id self, SEL _cmd) {
+    KS(@"[HOOK] ⭐ onTapVerify 拦截! 注入假状态后调原始");
+    logStack(0, 5);
+    injectFakeState();
+    
+    // 调原始 onTapVerify — 它会走到 activateCode:completion:（已被我们 hook）
+    if (g_orig_onTapVerify) {
+        ((void (*)(id, SEL))g_orig_onTapVerify)(self, _cmd);
+        KS(@"[HOOK]   onTapVerify 原始执行完毕");
+    }
+}
+
+#pragma mark - Hook 安装工具
+
+static void installHook(Class cls, SEL sel, IMP newImp, IMP *origOut, const char *label) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        KS(@"[HOOK] ❌ %s.%s not found (%s)", class_getName(cls), sel_getName(sel), label);
+        return;
+    }
+    IMP current = method_getImplementation(m);
+    if (origOut) *origOut = current;
+    method_setImplementation(m, newImp);
+    KS(@"[HOOK] ✅ %s.%s hooked (%s) origIMP=%p", class_getName(cls), sel_getName(sel), label, current);
+}
+
+#pragma mark - 全局扫描
+
+static void scanAllClasses(void) {
+    KS(@"[SCAN] === 全局扫描 activateCode / onTapVerify ===");
+    int numClasses = objc_getClassList(NULL, 0);
+    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    objc_getClassList(classes, numClasses);
+    
+    for (int i = 0; i < numClasses; i++) {
+        unsigned int mc = 0;
+        Method *methods = class_copyMethodList(classes[i], &mc);
+        if (!methods) continue;
+        
+        for (unsigned int j = 0; j < mc; j++) {
+            NSString *name = NSStringFromSelector(method_getName(methods[j]));
+            if ([name isEqualToString:@"activateCode:completion:"] ||
+                [name isEqualToString:@"onTapVerify"] ||
+                [name isEqualToString:@"verifyWithCompletion:"] ||
+                [name isEqualToString:@"checkTask"] ||
+                [name isEqualToString:@"radarCollectLoop"] ||
+                [name isEqualToString:@"setupAfterActivation"]) {
+                KS(@"[SCAN]   %s → %@", class_getName(classes[i]), name);
+            }
+        }
+        free(methods);
+    }
+    free(classes);
+    KS(@"[SCAN] === 扫描完成 ===");
 }
 
 #pragma mark - 构造函数
@@ -302,17 +309,20 @@ static void scanAndLogMethods(Class cls) {
 __attribute__((constructor))
 static void ks_init(void) {
     NSLog(@"========================================");
-    NSLog(@"[KfunSolo] v3 - Fixed Bypass");
+    NSLog(@"[KfunSolo] v5 - Final");
     NSLog(@"========================================");
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         g_win = [[KSWindow alloc] init];
         
-        KS(@"=== KfunSolo v3 启动 ===");
-        KS(@"修正：hook activateCode:completion: 而不是 onTapVerify");
-        KS(@"让原始流程走通: onTapVerify → activateCode → dismiss → ViewController → radarCollectLoop");
+        KS(@"=== KfunSolo v5-final 启动 ===");
+        KS(@"策略: 参考 KfunHook 原始做法");
+        KS(@"  1. Hook activateCode:completion: (C函数) → 直接回调成功");
+        KS(@"  2. Hook onTapVerify → 注入假状态 + 调原始");
+        KS(@"  3. 原始流程自动: dismiss → ViewController → radar");
         KS(@"");
         
+        // 崩溃捕获
         struct sigaction sa;
         sa.sa_sigaction = ks_crash_handler;
         sa.sa_flags = SA_SIGINFO;
@@ -324,100 +334,85 @@ static void ks_init(void) {
         NSSetUncaughtExceptionHandler(ks_exception_handler);
         KS(@"[INIT] 崩溃捕获已启用");
         
-        // === Hook WWWActivationViewController ===
+        // 先全局扫描
+        scanAllClasses();
+        
+        // ====== Hook WWWActivationViewController ======
         Class actVC = objc_getClass("WWWActivationViewController");
+        KS(@"[INIT] WWWActivationViewController: %s", actVC ? "✅" : "❌");
+        
         if (actVC) {
-            KS(@"[INIT] ✅ 找到 WWWActivationViewController");
+            // Hook onTapVerify — 注入假状态 + 调原始
+            installHook(actVC, @selector(onTapVerify),
+                       (IMP)kf_hooked_onTapVerify, &g_orig_onTapVerify, "注入假状态");
             
-            // WWWActivationViewController 只有 onTapVerify，没有 activateCode:completion:
-            // 不替换 onTapVerify，让它正常走，它会调 WWWActivation 的 activateCode:completion:
-            scanAndLogMethods(actVC);
-            
-        } else {
-            KS(@"[INIT] ❌ WWWActivationViewController not found!");
+            // 也 hook activateCode:completion:（以防万一这个类上也有）
+            installHook(actVC, @selector(activateCode:completion:),
+                       (IMP)kf_hooked_activateCode, NULL, "备用");
         }
         
-        // === Hook WWWActivation — activateCode:completion: 在这个类上！ ===
+        // ====== Hook WWWActivation ======
         Class activation = objc_getClass("WWWActivation");
+        KS(@"[INIT] WWWActivation: %s", activation ? "✅" : "❌");
+        
         if (activation) {
-            KS(@"[INIT] ✅ 找到 WWWActivation");
+            // ⚡ 核心 hook — 和 KfunHook 一样的做法
+            installHook(activation, @selector(activateCode:completion:),
+                       (IMP)kf_hooked_activateCode, &g_orig_activateCode, "核心");
             
-            // ⚡ 核心：hook activateCode:completion: — 拦截验证请求，直接返回成功
-            hookActivateCode(activation);
+            installHook(activation, @selector(verifyWithCompletion:),
+                       (IMP)kf_hooked_verifyWithCompletion, &g_orig_verifyWithCompletion, "备用");
             
-            // 备用：hook verifyWithCompletion:
-            hookVerifyWithCompletion(activation);
-            
-            // hook checkTask
-            hookCheckTask(activation);
-            
-            scanAndLogMethods(activation);
-            
-        } else {
-            KS(@"[INIT] ❌ WWWActivation not found!");
+            installHook(activation, @selector(checkTask),
+                       (IMP)kf_hooked_checkTask, NULL, "阻止后台验证");
         }
         
-        // === Hook ViewController ===
+        // ====== Hook ViewController ======
         Class mainVC = objc_getClass("ViewController");
+        KS(@"[INIT] ViewController: %s", mainVC ? "✅" : "❌");
+        
         if (mainVC) {
-            KS(@"[INIT] ✅ 找到 ViewController");
+            installHook(mainVC, @selector(checkTask),
+                       (IMP)kf_hooked_checkTask, NULL, "阻止后台验证");
             
-            // hook setupAfterActivation — 仅日志追踪，调用原始实现
-            hookSetupAfterActivation(mainVC);
-            
-            // hook checkTask — 防止后台定时验证失败
-            hookCheckTask(mainVC);
-            
-            // hook startContinuousAuthCheck — 防止持续验证失败
-            hookStartContinuousAuthCheck(mainVC);
-            
-            scanAndLogMethods(mainVC);
-            
-        } else {
-            KS(@"[INIT] ❌ ViewController not found!");
+            installHook(mainVC, @selector(startContinuousAuthCheck),
+                       (IMP)kf_hooked_startContinuousAuthCheck, &g_orig_startContinuousAuthCheck, "阻止持续验证");
         }
         
-        // === 重试机制 ===
-        if (!actVC || !mainVC || !activation) {
-            KS(@"[INIT] 等待 3 秒重试...");
+        // ====== 重试 ======
+        if (!actVC || !activation || !mainVC) {
+            KS(@"[INIT] 部分类未找到，3秒后重试...");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (!actVC) {
-                    Class retry = objc_getClass("WWWActivationViewController");
-                    if (retry) {
+                    Class r = objc_getClass("WWWActivationViewController");
+                    if (r) {
                         KS(@"[INIT] Retry: ✅ WWWActivationViewController");
-                        scanAndLogMethods(retry);
-                    } else {
-                        KS(@"[INIT] Retry: ❌ WWWActivationViewController still not found");
+                        installHook(r, @selector(onTapVerify), (IMP)kf_hooked_onTapVerify, &g_orig_onTapVerify, "retry");
+                        installHook(r, @selector(activateCode:completion:), (IMP)kf_hooked_activateCode, NULL, "retry");
                     }
                 }
                 if (!activation) {
-                    Class retry = objc_getClass("WWWActivation");
-                    if (retry) {
+                    Class r = objc_getClass("WWWActivation");
+                    if (r) {
                         KS(@"[INIT] Retry: ✅ WWWActivation");
-                        hookActivateCode(retry);
-                        hookVerifyWithCompletion(retry);
-                        hookCheckTask(retry);
-                        scanAndLogMethods(retry);
-                    } else {
-                        KS(@"[INIT] Retry: ❌ WWWActivation still not found");
+                        installHook(r, @selector(activateCode:completion:), (IMP)kf_hooked_activateCode, &g_orig_activateCode, "retry");
+                        installHook(r, @selector(verifyWithCompletion:), (IMP)kf_hooked_verifyWithCompletion, &g_orig_verifyWithCompletion, "retry");
                     }
                 }
                 if (!mainVC) {
-                    Class retry = objc_getClass("ViewController");
-                    if (retry) {
+                    Class r = objc_getClass("ViewController");
+                    if (r) {
                         KS(@"[INIT] Retry: ✅ ViewController");
-                        hookSetupAfterActivation(retry);
-                        hookCheckTask(retry);
-                        hookStartContinuousAuthCheck(retry);
-                        scanAndLogMethods(retry);
-                    } else {
-                        KS(@"[INIT] Retry: ❌ ViewController still not found");
+                        installHook(r, @selector(checkTask), (IMP)kf_hooked_checkTask, NULL, "retry");
+                        installHook(r, @selector(startContinuousAuthCheck), (IMP)kf_hooked_startContinuousAuthCheck, &g_orig_startContinuousAuthCheck, "retry");
                     }
                 }
+                scanAllClasses();
             });
         }
         
-        KS(@"[INIT] ✅ Hook 安装完成，等待用户点击验证...");
+        KS(@"[INIT] ✅ 所有 Hook 安装完成");
+        KS(@"[INIT] 现在请输入任意卡密，点击验证...");
     });
 }
 
