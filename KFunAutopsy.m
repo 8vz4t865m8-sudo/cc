@@ -189,6 +189,10 @@ static NSDictionary *buildFakeServerResponse(void) {
     };
 }
 
+#pragma mark - 前向声明
+
+static void ks_initMainVC(void);
+
 #pragma mark - 保存原始 IMP
 
 static IMP g_orig_activateCode = NULL;
