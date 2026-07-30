@@ -66,8 +66,22 @@ static void hook_onTapVerify(id self, SEL _cmd) {
     NSLog(@"[KFun] onTapVerify -> bypassed (no original call)");
     writeStamp();
 
-    // 直接 dismiss，不调用原始 onTapVerify
-    [self dismissViewControllerAnimated:YES completion:nil];
+    // 先尝试调用 onVerify 回调（主界面靠这个加载内容）
+    @try {
+        void (^onVerify)(void) = [self valueForKey:@"onVerify"];
+        if (onVerify) {
+            NSLog(@"[KFun] calling onVerify block");
+            onVerify();
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[KFun] onVerify call failed: %@", e);
+    }
+
+    // 延迟 dismiss，让 onVerify 有时间触发
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self dismissViewControllerAnimated:YES completion:nil];
+    });
 }
 
 // ============================================================
