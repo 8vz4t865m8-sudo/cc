@@ -329,26 +329,32 @@ static void ks_init(void) {
         if (actVC) {
             KS(@"[INIT] ✅ 找到 WWWActivationViewController");
             
-            // ⚡ 核心：hook activateCode:completion: — 拦截验证请求，直接返回成功
-            hookActivateCode(actVC);
-            
-            // 备用：hook verifyWithCompletion: — 部分版本可能走这个路径
-            hookVerifyWithCompletion(actVC);
-            
-            // 仅日志：hook showSuccess 和 setupAfterActivation 用于追踪流程
-            hookSetupAfterActivation(actVC);
-            
-            // hook checkTask — 防止后台定时验证失败
-            hookCheckTask(actVC);
-            
-            // hook startContinuousAuthCheck — 防止持续验证失败
-            hookStartContinuousAuthCheck(actVC);
-            
-            // 扫描并记录所有验证相关方法
+            // WWWActivationViewController 只有 onTapVerify，没有 activateCode:completion:
+            // 不替换 onTapVerify，让它正常走，它会调 WWWActivation 的 activateCode:completion:
             scanAndLogMethods(actVC);
             
         } else {
             KS(@"[INIT] ❌ WWWActivationViewController not found!");
+        }
+        
+        // === Hook WWWActivation — activateCode:completion: 在这个类上！ ===
+        Class activation = objc_getClass("WWWActivation");
+        if (activation) {
+            KS(@"[INIT] ✅ 找到 WWWActivation");
+            
+            // ⚡ 核心：hook activateCode:completion: — 拦截验证请求，直接返回成功
+            hookActivateCode(activation);
+            
+            // 备用：hook verifyWithCompletion:
+            hookVerifyWithCompletion(activation);
+            
+            // hook checkTask
+            hookCheckTask(activation);
+            
+            scanAndLogMethods(activation);
+            
+        } else {
+            KS(@"[INIT] ❌ WWWActivation not found!");
         }
         
         // === Hook ViewController ===
@@ -372,21 +378,28 @@ static void ks_init(void) {
         }
         
         // === 重试机制 ===
-        if (!actVC || !mainVC) {
+        if (!actVC || !mainVC || !activation) {
             KS(@"[INIT] 等待 3 秒重试...");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (!actVC) {
                     Class retry = objc_getClass("WWWActivationViewController");
                     if (retry) {
                         KS(@"[INIT] Retry: ✅ WWWActivationViewController");
-                        hookActivateCode(retry);
-                        hookVerifyWithCompletion(retry);
-                        hookSetupAfterActivation(retry);
-                        hookCheckTask(retry);
-                        hookStartContinuousAuthCheck(retry);
                         scanAndLogMethods(retry);
                     } else {
                         KS(@"[INIT] Retry: ❌ WWWActivationViewController still not found");
+                    }
+                }
+                if (!activation) {
+                    Class retry = objc_getClass("WWWActivation");
+                    if (retry) {
+                        KS(@"[INIT] Retry: ✅ WWWActivation");
+                        hookActivateCode(retry);
+                        hookVerifyWithCompletion(retry);
+                        hookCheckTask(retry);
+                        scanAndLogMethods(retry);
+                    } else {
+                        KS(@"[INIT] Retry: ❌ WWWActivation still not found");
                     }
                 }
                 if (!mainVC) {
