@@ -1,6 +1,7 @@
 //
-//  KfunSolo.m  v2-fix
-//  修正：C 函数中不能使用 self，_ks_initMainVC 改为 static C 函数
+//  KfunSolo.m  v3-fix
+//  修正：hook activateCode:completion: 而不是 onTapVerify
+//  让原始 onTapVerify 流程走通，自动 dismiss → 展示 ViewController → 初始化雷达
 //
 
 #import <UIKit/UIKit.h>
@@ -88,7 +89,7 @@
         bar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.98];
         [self addSubview:bar];
         UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, W-140, 26)];
-        t.text = @"🚀 KfunSolo v2"; t.font = [UIFont boldSystemFontOfSize:12];
+        t.text = @"🚀 KfunSolo v3"; t.font = [UIFont boldSystemFontOfSize:12];
         t.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.5 alpha:1.0];
         [bar addSubview:t];
         UIButton *cp = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -153,29 +154,6 @@ static void ks_exception_handler(NSException *e) {
 
 #pragma mark - 辅助
 
-static void dumpDict(id obj, int depth) {
-    if (!obj || ![obj isKindOfClass:[NSDictionary class]]) {
-        KS(@"%@⚠️ 非字典: %@ (%@)", [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0], obj, NSStringFromClass([obj class]));
-        return;
-    }
-    for (id k in (NSDictionary *)obj) {
-        id v = ((NSDictionary *)obj)[k];
-        NSString *ind = [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0];
-        if ([v isKindOfClass:[NSDictionary class]]) {
-            KS(@"%@\"%@\" → {", ind, k);
-            dumpDict(v, depth+1);
-            KS(@"%@}", ind);
-        } else if ([v isKindOfClass:[NSArray class]]) {
-            KS(@"%@\"%@\" → [%lu]", ind, k, (unsigned long)[(NSArray *)v count]);
-            for (id item in (NSArray *)v) KS(@"%@  · %@", ind, item);
-        } else {
-            NSString *d = [v description];
-            if (d.length > 120) d = [d substringToIndex:120];
-            KS(@"%@\"%@\" = \"%@\" [%@]", ind, k, d, NSStringFromClass([v class]));
-        }
-    }
-}
-
 static void logStack(int skip, int max) {
     NSArray *syms = [NSThread callStackSymbols];
     for (int i = skip+2; i < MIN((int)syms.count, skip+2+max); i++) KS(@"  ↳ %@", syms[i]);
@@ -211,291 +189,75 @@ static void injectFakeState(void) {
     KS(@"[FAKE] 已注入伪造验证状态");
 }
 
-#pragma mark - 前向声明
+#pragma mark - Hook 入口 — 核心改动
 
-static void ks_initMainVC(id mainVC);
-static void ks_initXPF(void);
-static void ks_postDismissInit(void);
-
-#pragma mark - 补全初始化链（仅此函数被修改）
-
-static void runFullInitChain(id activationVC) {
-    KS(@"[INIT] ⭐ 开始补全初始化链");
+// ✅ Hook activateCode:completion: 而不是 onTapVerify
+// 让 onTapVerify 原始代码正常执行，它内部会调用 activateCode:completion:
+// 我们拦截这个方法，直接回调成功，原始流程就会继续走：dismiss → 展示主页 → 初始化雷达
+static void hookActivateCode(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(activateCode:completion:));
+    if (!m) { KS(@"[HOOK] ❌ activateCode:completion: not found"); return; }
+    KS(@"[HOOK] ✅ activateCode:completion:");
     
-    @try {
-        id spinner = [activationVC valueForKey:@"spinner"];
-        if (spinner && [spinner isKindOfClass:[UIActivityIndicatorView class]]) {
-            [(UIActivityIndicatorView *)spinner stopAnimating];
-            [(UIActivityIndicatorView *)spinner setHidden:YES];
-            KS(@"[INIT]   spinner 已停止");
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^(id self, id code, void (^completion)(BOOL success, id result)) {
+        KS(@"[ACT] ⭐ activateCode 拦截 — code=%@", code);
+        logStack(0, 3);
+        injectFakeState();
+        // 直接回调成功，让 onTapVerify 的原始流程继续执行
+        if (completion) {
+            completion(YES, buildFakeResponse());
+            KS(@"[ACT]   ✅ 已回调 success=YES，原始流程将继续");
         }
-    } @catch (NSException *e) {}
-    
-    @try {
-        id err = [activationVC valueForKey:@"errorLabel"];
-        if (err && [err isKindOfClass:[UIView class]]) [(UIView *)err setHidden:YES];
-    } @catch (NSException *e) {}
-    
-    @try {
-        id mask = [activationVC valueForKey:@"authMaskView"];
-        if (mask && [mask isKindOfClass:[UIView class]]) {
-            [(UIView *)mask setHidden:YES];
-            [(UIView *)mask removeFromSuperview];
-            KS(@"[INIT]   authMaskView 已移除");
-        }
-    } @catch (NSException *e) {}
-    
-    @try {
-        if ([activationVC respondsToSelector:@selector(buildSuccessViewWithExpire:)]) {
-            NSString *expireStr = @"2099-12-31 23:59:59";
-            [activationVC performSelector:@selector(buildSuccessViewWithExpire:) withObject:expireStr];
-            KS(@"[INIT]   buildSuccessViewWithExpire: 已调用 (NSString: %@)", expireStr);
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   buildSuccessViewWithExpire: 异常: %@", e.reason); }
-    
-    // ⭐ 核心修正：showSuccess 的 completion 里等 dismiss 后再初始化
-    @try {
-        if ([activationVC respondsToSelector:@selector(showSuccess:completion:)]) {
-            void (^comp)(void) = ^{
-                KS(@"[INIT]   showSuccess completion 执行（页面应已自动消失）");
-                // 等一小会儿确保 dismiss 动画完成
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    ks_postDismissInit();
-                });
-            };
-            [activationVC performSelector:@selector(showSuccess:completion:) withObject:@"到期时间:2099-12-31 23:59:59" withObject:comp];
-            KS(@"[INIT]   showSuccess:completion: 已调用（等待 2 秒自动消失）");
-        } else {
-            // 如果没有 showSuccess，直接初始化
-            KS(@"[INIT]   showSuccess 不存在，直接初始化");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                ks_postDismissInit();
-            });
-        }
-    } @catch (NSException *e) { 
-        KS(@"[INIT]   showSuccess:completion: 异常: %@", e.reason);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            ks_postDismissInit();
-        });
-    }
+    });
+    method_setImplementation(m, newIMP);
 }
 
-static id ks_findMainVC(void) {
-    Class mainClass = objc_getClass("ViewController");
-    if (!mainClass) return nil;
+// ✅ 也 hook verifyWithCompletion: 作为备用
+// 有些版本可能不走 activateCode 而走 verifyWithCompletion
+static void hookVerifyWithCompletion(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(verifyWithCompletion:));
+    if (!m) { KS(@"[HOOK] ⚠️ verifyWithCompletion: not found"); return; }
+    KS(@"[HOOK] ✅ verifyWithCompletion:");
     
-    for (UIWindow *window in [UIApplication sharedApplication].windows) {
-        UIViewController *root = window.rootViewController;
-        if ([root isKindOfClass:mainClass]) return root;
-        if ([root isKindOfClass:[UINavigationController class]]) {
-            UINavigationController *nav = (UINavigationController *)root;
-            for (UIViewController *vc in nav.viewControllers) {
-                if ([vc isKindOfClass:mainClass]) return vc;
-            }
-            if ([nav.topViewController isKindOfClass:mainClass]) return nav.topViewController;
-        }
-        if ([root isKindOfClass:[UITabBarController class]]) {
-            UITabBarController *tab = (UITabBarController *)root;
-            for (UIViewController *vc in tab.viewControllers) {
-                if ([vc isKindOfClass:mainClass]) return vc;
-                if ([vc isKindOfClass:[UINavigationController class]]) {
-                    UINavigationController *nav = (UINavigationController *)vc;
-                    for (UIViewController *nvc in nav.viewControllers) {
-                        if ([nvc isKindOfClass:mainClass]) return nvc;
-                    }
-                }
-            }
-        }
-    }
-    
-    for (UIWindow *window in [UIApplication sharedApplication].windows) {
-        UIViewController *top = window.rootViewController;
-        while (top.presentedViewController) {
-            top = top.presentedViewController;
-            if ([top isKindOfClass:mainClass]) return top;
-            if ([top isKindOfClass:[UINavigationController class]]) {
-                UINavigationController *nav = (UINavigationController *)top;
-                for (UIViewController *vc in nav.viewControllers) {
-                    if ([vc isKindOfClass:mainClass]) return vc;
-                }
-            }
-        }
-    }
-    
-    return nil;
+    __block IMP orig = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^(id self, void (^completion)(BOOL)) {
+        KS(@"[ACT] ⭐ verifyWithCompletion 拦截");
+        injectFakeState();
+        if (completion) completion(YES);
+    });
+    method_setImplementation(m, newIMP);
 }
 
-static void ks_postDismissInit(void) {
-    id mainVC = ks_findMainVC();
-    
-    if (!mainVC) {
-        KS(@"[INIT]   ❌ 未找到主页 ViewController，1秒后重试...");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            id retry = ks_findMainVC();
-            if (retry) {
-                KS(@"[INIT]   重试找到主页: %@", retry);
-                ks_initMainVC(retry);
-            } else {
-                KS(@"[INIT]   ❌ 重试仍未找到主页");
-            }
-        });
-        return;
-    }
-    
-    KS(@"[INIT]   找到主页: %@", mainVC);
-    ks_initMainVC(mainVC);
-}
-
-static void ks_initMainVC(id mainVC) {
-    @try {
-        if ([mainVC respondsToSelector:@selector(setupAfterActivation)]) {
-            [mainVC performSelector:@selector(setupAfterActivation)];
-            KS(@"[INIT]   ✅ setupAfterActivation 已调用");
-        } else {
-            KS(@"[INIT]   ⚠️ setupAfterActivation 不存在");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ setupAfterActivation 异常: %@", e.reason); }
-    
-    @try {
-        if ([mainVC respondsToSelector:@selector(setupBackgroundKeepAlive)]) {
-            [mainVC performSelector:@selector(setupBackgroundKeepAlive)];
-            KS(@"[INIT]   ✅ setupBackgroundKeepAlive 已调用");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ setupBackgroundKeepAlive 异常: %@", e.reason); }
-    
-    @try {
-        if ([mainVC respondsToSelector:@selector(startContinuousAuthCheck)]) {
-            [mainVC performSelector:@selector(startContinuousAuthCheck)];
-            KS(@"[INIT]   ✅ startContinuousAuthCheck 已调用");
-        } else {
-            KS(@"[INIT]   ⚠️ startContinuousAuthCheck 不存在于主页");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ startContinuousAuthCheck 异常: %@", e.reason); }
-    
-    @try {
-        id tv = [mainVC valueForKey:@"tableView"];
-        if (tv && [tv isKindOfClass:[UITableView class]]) {
-            [(UITableView *)tv reloadData];
-            KS(@"[INIT]   ✅ tableView reloadData");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ tableView 刷新异常: %@", e.reason); }
-    
-    ks_initXPF();
-}
-
-static void ks_initXPF(void) {
-    KS(@"[XPF] 尝试初始化...");
-    unsigned int count = _dyld_image_count();
-    void *handle = NULL;
-    for (unsigned int i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (strstr(name, "libxpf.dylib")) {
-            handle = dlopen(name, RTLD_NOLOAD);
-            KS(@"[XPF] libxpf found: %s handle=%p", name, handle);
-            break;
-        }
-    }
-    if (!handle) { KS(@"[XPF] ❌ libxpf not loaded"); return; }
-    
-    const char *syms[] = {
-        "init", "start", "run", "open", "setup", "config",
-        "xpf_init", "xpf_start", "xpf_run", "xpf_open", "xpf_setup",
-        "xpf_find_cpu_ttep", "xpf_find_allproc", "xpf_find_arm_vm_init",
-        "xpf_find_kern_version", "xpf_find_pmap_enter_options",
-        "xpf_find_ptov_table", "xpf_find_vm_first_phys", "xpf_find_vm_last_phys",
-        "xpf_find_physmap_base", "xpf_find_kernel_slide", "xpf_find_gPhysBase",
-        "xpf_find_gPhysSize", "xpf_find_gVirtBase",
-        NULL
-    };
-    int found = 0;
-    for (int i = 0; syms[i]; i++) {
-        void *addr = dlsym(handle, syms[i]);
-        if (addr) {
-            KS(@"[XPF]   dlsym(%s) = %p", syms[i], addr);
-            found++;
-        }
-    }
-    if (found == 0) KS(@"[XPF]   所有符号均未找到（已被 strip）");
-    
-    int numClasses = objc_getClassList(NULL, 0);
-    if (numClasses > 0) {
-        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-        objc_getClassList(classes, numClasses);
-        for (int i = 0; i < numClasses; i++) {
-            const char *name = class_getName(classes[i]);
-            if (strstr(name, "xpf") || strstr(name, "XPF") || strstr(name, "kfd") || strstr(name, "KFD")) {
-                KS(@"[XPF]   发现相关类: %s", name);
-                unsigned int mc = 0;
-                Method *methods = class_copyMethodList(classes[i], &mc);
-                for (unsigned int j = 0; j < mc; j++) {
-                    KS(@"[XPF]     方法: %s", sel_getName(method_getName(methods[j])));
-                }
-                if (methods) free(methods);
-            }
-        }
-        free(classes);
-    }
-}
-
-#pragma mark - 自动发现验证方法
-
-static void scanAndHookVerifyMethods(Class cls) {
-    KS(@"[SCAN] 扫描 %s 的验证相关方法...", class_getName(cls));
-    unsigned int mc = 0;
-    Method *methods = class_copyMethodList(cls, &mc);
-    int hooked = 0;
-    for (unsigned int i = 0; i < mc; i++) {
-        SEL sel = method_getName(methods[i]);
-        NSString *name = NSStringFromSelector(sel);
-        NSString *lower = [name lowercaseString];
-        
-        if ([lower containsString:@"verify"] || [lower containsString:@"check"] || 
-            [lower containsString:@"auth"] || [lower containsString:@"activ"] || 
-            [lower containsString:@"code"] || [lower containsString:@"license"] ||
-            [lower containsString:@"login"] || [lower containsString:@"valid"]) {
-            
-            KS(@"[SCAN]   发现方法: %@", name);
-            hooked++;
-        }
-    }
-    if (methods) free(methods);
-    KS(@"[SCAN]   发现 %d 个验证相关方法", hooked);
-}
-
-#pragma mark - Hook 入口
-
-static void hookOnTapVerify(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(onTapVerify));
-    if (!m) { KS(@"[HOOK] ❌ onTapVerify not found"); return; }
-    KS(@"[HOOK] ✅ onTapVerify");
+// ✅ Hook checkTask — 防止后台定时验证失败导致退出
+static void hookCheckTask(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(checkTask));
+    if (!m) { KS(@"[HOOK] ⚠️ checkTask not found"); return; }
+    KS(@"[HOOK] ✅ checkTask");
     
     __block IMP orig = method_getImplementation(m);
     IMP newIMP = imp_implementationWithBlock(^void(id self) {
-        KS(@"[ACT] ⭐ onTapVerify 拦截 — 开始自主验证");
-        logStack(0, 3);
-        injectFakeState();
-        runFullInitChain(self);
+        KS(@"[AUTH] ⭐ checkTask 拦截 — 跳过验证检查");
+        // 不调用原始实现，直接返回，防止验证失败
     });
     method_setImplementation(m, newIMP);
 }
 
-static void hookShowSuccess(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(showSuccess:completion:));
-    if (!m) return;
-    KS(@"[HOOK] ✅ showSuccess:completion:");
+// ✅ Hook startContinuousAuthCheck — 防止持续验证失败
+static void hookStartContinuousAuthCheck(Class cls) {
+    Method m = class_getInstanceMethod(cls, @selector(startContinuousAuthCheck));
+    if (!m) { KS(@"[HOOK] ⚠️ startContinuousAuthCheck not found"); return; }
+    KS(@"[HOOK] ✅ startContinuousAuthCheck in %s", class_getName(cls));
     
     __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^void(id self, id msg, void (^completion)(void)) {
-        KS(@"[ACT] ⭐ showSuccess: %@", msg);
-        void (^wrapped)(void) = ^{
-            if (completion) completion();
-            KS(@"[ACT]   showSuccess completion 执行完毕");
-        };
-        ((void (*)(id, SEL, id, void (^)(void)))orig)(self, @selector(showSuccess:completion:), msg, wrapped);
+    IMP newIMP = imp_implementationWithBlock(^void(id self) {
+        KS(@"[AUTH] ⭐ startContinuousAuthCheck 拦截 — 跳过持续验证");
+        // 不调用原始实现，防止持续验证失败导致退出
     });
     method_setImplementation(m, newIMP);
 }
 
+// ✅ Hook setupAfterActivation — 仅用于日志，调用原始实现
 static void hookSetupAfterActivation(Class cls) {
     Method m = class_getInstanceMethod(cls, @selector(setupAfterActivation));
     if (!m) return;
@@ -503,27 +265,36 @@ static void hookSetupAfterActivation(Class cls) {
     
     __block IMP orig = method_getImplementation(m);
     IMP newIMP = imp_implementationWithBlock(^void(id self) {
-        KS(@"[MAIN] ⭐ setupAfterActivation START");
+        KS(@"[MAIN] ⭐ setupAfterActivation START (class=%s)", class_getName([self class]));
         logStack(0, 6);
+        // 调用原始实现！这是初始化雷达的关键
         ((void (*)(id, SEL))orig)(self, @selector(setupAfterActivation));
-        KS(@"[MAIN]   setupAfterActivation END");
+        KS(@"[MAIN]   ✅ setupAfterActivation END");
     });
     method_setImplementation(m, newIMP);
 }
 
-static void hookStartContinuousAuthCheck(Class cls) {
-    Method m = class_getInstanceMethod(cls, @selector(startContinuousAuthCheck));
-    if (!m) return;
-    KS(@"[HOOK] ✅ startContinuousAuthCheck in %s", class_getName(cls));
-    
-    __block IMP orig = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^void(id self) {
-        KS(@"[AUTH] ⭐ startContinuousAuthCheck START");
-        logStack(0, 6);
-        ((void (*)(id, SEL))orig)(self, @selector(startContinuousAuthCheck));
-        KS(@"[AUTH]   startContinuousAuthCheck END");
-    });
-    method_setImplementation(m, newIMP);
+#pragma mark - 自动扫描验证方法（仅日志）
+
+static void scanAndLogMethods(Class cls) {
+    KS(@"[SCAN] 扫描 %s 的方法...", class_getName(cls));
+    unsigned int mc = 0;
+    Method *methods = class_copyMethodList(cls, &mc);
+    int found = 0;
+    for (unsigned int i = 0; i < mc; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        NSString *lower = [name lowercaseString];
+        if ([lower containsString:@"verify"] || [lower containsString:@"check"] || 
+            [lower containsString:@"auth"] || [lower containsString:@"activ"] || 
+            [lower containsString:@"code"] || [lower containsString:@"setup"] ||
+            [lower containsString:@"radar"] || [lower containsString:@"loop"]) {
+            KS(@"[SCAN]   %@", name);
+            found++;
+        }
+    }
+    if (methods) free(methods);
+    KS(@"[SCAN]   发现 %d 个相关方法", found);
 }
 
 #pragma mark - 构造函数
@@ -531,18 +302,15 @@ static void hookStartContinuousAuthCheck(Class cls) {
 __attribute__((constructor))
 static void ks_init(void) {
     NSLog(@"========================================");
-    NSLog(@"[KfunSolo] v2 - Fixed Bypass");
+    NSLog(@"[KfunSolo] v3 - Fixed Bypass");
     NSLog(@"========================================");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         g_win = [[KSWindow alloc] init];
         
-        KS(@"=== KfunSolo v2 启动 ===");
-        KS(@"修正：");
-        KS(@"1. buildSuccessViewWithExpire: 传入 NSString");
-        KS(@"2. 不手动 dismiss，延迟后自动找主页");
-        KS(@"3. _ks_initMainVC 改为 static C 函数");
-        KS(@"4. 增强主页查找逻辑");
+        KS(@"=== KfunSolo v3 启动 ===");
+        KS(@"修正：hook activateCode:completion: 而不是 onTapVerify");
+        KS(@"让原始流程走通: onTapVerify → activateCode → dismiss → ViewController → radarCollectLoop");
         KS(@"");
         
         struct sigaction sa;
@@ -556,50 +324,87 @@ static void ks_init(void) {
         NSSetUncaughtExceptionHandler(ks_exception_handler);
         KS(@"[INIT] 崩溃捕获已启用");
         
+        // === Hook WWWActivationViewController ===
         Class actVC = objc_getClass("WWWActivationViewController");
         if (actVC) {
-            hookOnTapVerify(actVC);
-            hookShowSuccess(actVC);
+            KS(@"[INIT] ✅ 找到 WWWActivationViewController");
+            
+            // ⚡ 核心：hook activateCode:completion: — 拦截验证请求，直接返回成功
+            hookActivateCode(actVC);
+            
+            // 备用：hook verifyWithCompletion: — 部分版本可能走这个路径
+            hookVerifyWithCompletion(actVC);
+            
+            // 仅日志：hook showSuccess 和 setupAfterActivation 用于追踪流程
             hookSetupAfterActivation(actVC);
+            
+            // hook checkTask — 防止后台定时验证失败
+            hookCheckTask(actVC);
+            
+            // hook startContinuousAuthCheck — 防止持续验证失败
             hookStartContinuousAuthCheck(actVC);
-            scanAndHookVerifyMethods(actVC);
+            
+            // 扫描并记录所有验证相关方法
+            scanAndLogMethods(actVC);
+            
         } else {
-            KS(@"[INIT] ⚠️ WWWActivationViewController not found, retrying...");
+            KS(@"[INIT] ❌ WWWActivationViewController not found!");
         }
         
+        // === Hook ViewController ===
         Class mainVC = objc_getClass("ViewController");
         if (mainVC) {
+            KS(@"[INIT] ✅ 找到 ViewController");
+            
+            // hook setupAfterActivation — 仅日志追踪，调用原始实现
             hookSetupAfterActivation(mainVC);
+            
+            // hook checkTask — 防止后台定时验证失败
+            hookCheckTask(mainVC);
+            
+            // hook startContinuousAuthCheck — 防止持续验证失败
             hookStartContinuousAuthCheck(mainVC);
-            scanAndHookVerifyMethods(mainVC);
+            
+            scanAndLogMethods(mainVC);
+            
         } else {
-            KS(@"[INIT] ⚠️ ViewController not found, retrying...");
+            KS(@"[INIT] ❌ ViewController not found!");
         }
         
+        // === 重试机制 ===
         if (!actVC || !mainVC) {
+            KS(@"[INIT] 等待 3 秒重试...");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (!actVC) {
                     Class retry = objc_getClass("WWWActivationViewController");
                     if (retry) {
-                        KS(@"[INIT] Retry: WWWActivationViewController");
-                        hookOnTapVerify(retry);
-                        hookShowSuccess(retry);
+                        KS(@"[INIT] Retry: ✅ WWWActivationViewController");
+                        hookActivateCode(retry);
+                        hookVerifyWithCompletion(retry);
                         hookSetupAfterActivation(retry);
+                        hookCheckTask(retry);
                         hookStartContinuousAuthCheck(retry);
-                        scanAndHookVerifyMethods(retry);
+                        scanAndLogMethods(retry);
+                    } else {
+                        KS(@"[INIT] Retry: ❌ WWWActivationViewController still not found");
                     }
                 }
                 if (!mainVC) {
                     Class retry = objc_getClass("ViewController");
                     if (retry) {
-                        KS(@"[INIT] Retry: ViewController");
+                        KS(@"[INIT] Retry: ✅ ViewController");
                         hookSetupAfterActivation(retry);
+                        hookCheckTask(retry);
                         hookStartContinuousAuthCheck(retry);
-                        scanAndHookVerifyMethods(retry);
+                        scanAndLogMethods(retry);
+                    } else {
+                        KS(@"[INIT] Retry: ❌ ViewController still not found");
                     }
                 }
             });
         }
+        
+        KS(@"[INIT] ✅ Hook 安装完成，等待用户点击验证...");
     });
 }
 
