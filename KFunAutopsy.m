@@ -109,5 +109,3 @@ static void KFunBypass_init(void) {
         NSLog(@"[KFunBypass] ========== hooks done ==========");
     });
 }
-```
-
