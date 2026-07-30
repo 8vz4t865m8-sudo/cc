@@ -261,7 +261,50 @@ static void kf_hooked_onTapVerify(id self, SEL _cmd) {
     });
 }
 
-#pragma mark - Hook: checkTask / startContinuousAuthCheck
+#pragma mark - 追踪 Hook
+
+static IMP g_orig_radarCollectLoop = NULL;
+static IMP g_orig_radarPushLoop = NULL;
+static IMP g_orig_readLoop = NULL;
+static IMP g_orig_setup = NULL;
+
+// radarCollectLoop hook - 追踪
+static void kf_hooked_radarCollectLoop(id self, SEL _cmd) {
+    KS(@"[HOOK] ⭐ radarCollectLoop START");
+    logStack(0, 5);
+    if (g_orig_radarCollectLoop) {
+        ((void (*)(id, SEL))g_orig_radarCollectLoop)(self, _cmd);
+        KS(@"[HOOK]   radarCollectLoop 原始执行完毕");
+    }
+}
+
+// radarPushLoop hook - 追踪
+static void kf_hooked_radarPushLoop(id self, SEL _cmd) {
+    KS(@"[HOOK] ⭐ radarPushLoop START");
+    if (g_orig_radarPushLoop) {
+        ((void (*)(id, SEL))g_orig_radarPushLoop)(self, _cmd);
+        KS(@"[HOOK]   radarPushLoop 原始执行完毕");
+    }
+}
+
+// readLoop hook - 追踪
+static void kf_hooked_readLoop(id self, SEL _cmd) {
+    KS(@"[HOOK] ⭐ readLoop START");
+    if (g_orig_readLoop) {
+        ((void (*)(id, SEL))g_orig_readLoop)(self, _cmd);
+        KS(@"[HOOK]   readLoop 原始执行完毕");
+    }
+}
+
+// setup hook - 追踪
+static void kf_hooked_setup(id self, SEL _cmd) {
+    KS(@"[HOOK] ⭐ setup START");
+    logStack(0, 5);
+    if (g_orig_setup) {
+        ((void (*)(id, SEL))g_orig_setup)(self, _cmd);
+        KS(@"[HOOK]   setup 原始执行完毕");
+    }
+}
 
 static void kf_hooked_checkTask(id self, SEL _cmd) {
     KS(@"[HOOK] ⭐ checkTask 拦截 — 跳过");
@@ -328,7 +371,26 @@ static void ks_initMainVC(void) {
     
     KS(@"[INIT]   ✅ 找到主页: %@", mainVC);
     
-    // 调用 setupAfterActivation
+    // ⚡ 按正确顺序调用初始化链
+    // 正常流程: viewDidLoad → setup → setupAfterActivation → radarCollectLoop → radarPushLoop
+    
+    // 1. viewDidLoad
+    @try {
+        if ([mainVC respondsToSelector:@selector(viewDidLoad)]) {
+            [mainVC performSelector:@selector(viewDidLoad)];
+            KS(@"[INIT]   ✅ viewDidLoad 已调用");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ viewDidLoad 异常: %@", e.reason); }
+    
+    // 2. setup
+    @try {
+        if ([mainVC respondsToSelector:@selector(setup)]) {
+            [mainVC performSelector:@selector(setup)];
+            KS(@"[INIT]   ✅ setup 已调用");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ setup 异常: %@", e.reason); }
+    
+    // 3. setupAfterActivation
     @try {
         if ([mainVC respondsToSelector:@selector(setupAfterActivation)]) {
             [mainVC performSelector:@selector(setupAfterActivation)];
@@ -344,13 +406,29 @@ static void ks_initMainVC(void) {
         }
     } @catch (NSException *e) {}
     
-    // 调用 radarCollectLoop
+    // 调用 radarCollectLoop（收集数据）
     @try {
         if ([mainVC respondsToSelector:@selector(radarCollectLoop)]) {
             [mainVC performSelector:@selector(radarCollectLoop)];
             KS(@"[INIT]   ✅ radarCollectLoop 已调用");
         }
     } @catch (NSException *e) { KS(@"[INIT]   ❌ radarCollectLoop 异常: %@", e.reason); }
+    
+    // 调用 radarPushLoop（推送数据到前端）
+    @try {
+        if ([mainVC respondsToSelector:@selector(radarPushLoop)]) {
+            [mainVC performSelector:@selector(radarPushLoop)];
+            KS(@"[INIT]   ✅ radarPushLoop 已调用");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ radarPushLoop 异常: %@", e.reason); }
+    
+    // 调用 readLoop（读取循环）
+    @try {
+        if ([mainVC respondsToSelector:@selector(readLoop)]) {
+            [mainVC performSelector:@selector(readLoop)];
+            KS(@"[INIT]   ✅ readLoop 已调用");
+        }
+    } @catch (NSException *e) { KS(@"[INIT]   ❌ readLoop 异常: %@", e.reason); }
     
     // 刷新 tableView
     @try {
@@ -464,6 +542,11 @@ static void ks_init(void) {
         if (mainVC) {
             installHook(mainVC, @selector(checkTask), (IMP)kf_hooked_checkTask, NULL, "防验证");
             installHook(mainVC, @selector(startContinuousAuthCheck), (IMP)kf_hooked_startContinuousAuthCheck, &g_orig_startContinuousAuthCheck, "防验证");
+            // 追踪数据层方法
+            installHook(mainVC, @selector(setup), (IMP)kf_hooked_setup, &g_orig_setup, "追踪");
+            installHook(mainVC, @selector(radarCollectLoop), (IMP)kf_hooked_radarCollectLoop, &g_orig_radarCollectLoop, "追踪");
+            installHook(mainVC, @selector(radarPushLoop), (IMP)kf_hooked_radarPushLoop, &g_orig_radarPushLoop, "追踪");
+            installHook(mainVC, @selector(readLoop), (IMP)kf_hooked_readLoop, &g_orig_readLoop, "追踪");
         }
         
         KS(@"[INIT] ✅ Hook 安装完成，点击验证即可...");
