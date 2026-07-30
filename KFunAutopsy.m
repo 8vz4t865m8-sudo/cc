@@ -1,22 +1,18 @@
 //
-//  KfunSolo.m  v5-final
-//  核心策略：
-//  1. hook onTapVerify → 完全替换，不调原始（绕过15位校验+网络请求）
-//  2. hook activateCode:completion: → C函数直接回调成功
-//  3. 手动 dismiss + 触发 ViewController 初始化
+//  KfunSpy.m
+//  纯观察版 — 不替换任何方法，只记录调用链
+//  用正确卡密验证一次，记录完整流程
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
-#import <signal.h>
-#import <execinfo.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-#pragma mark - 日志引擎
+#pragma mark - 日志
 
 @interface KSLogger : NSObject
 + (instancetype)shared;
@@ -29,10 +25,8 @@
 
 @implementation KSLogger
 + (instancetype)shared {
-    static KSLogger *s;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{ s = [[self alloc] init]; });
-    return s;
+    static KSLogger *s; static dispatch_once_t t;
+    dispatch_once(&t, ^{ s = [[self alloc] init]; }); return s;
 }
 - (instancetype)init {
     self = [super init];
@@ -42,15 +36,13 @@
     return self;
 }
 - (void)log:(NSString *)fmt, ... {
-    va_list ap;
-    va_start(ap, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
+    va_list ap; va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap]; va_end(ap);
     NSString *ts = [_timeFmt stringFromDate:[NSDate date]];
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, msg];
     [_buffer appendString:line];
     NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *path = [[docs firstObject] stringByAppendingPathComponent:@"kfun_solo.log"];
+    NSString *path = [[docs firstObject] stringByAppendingPathComponent:@"kfun_spy.log"];
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
     if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
     else { [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
@@ -91,7 +83,7 @@
         bar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.98];
         [self addSubview:bar];
         UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, W-140, 26)];
-        t.text = @"🚀 KfunSolo v5"; t.font = [UIFont boldSystemFontOfSize:12];
+        t.text = @"🔍 KfunSpy"; t.font = [UIFont boldSystemFontOfSize:12];
         t.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.5 alpha:1.0];
         [bar addSubview:t];
         UIButton *cp = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -111,7 +103,7 @@
         _console = [[UITextView alloc] initWithFrame:CGRectMake(3, 38, W-6, H-42)];
         _console.backgroundColor = [UIColor clearColor];
         _console.textColor = [UIColor colorWithRed:0.0 green:0.85 blue:0.4 alpha:1.0];
-        _console.font = [UIFont fontWithName:@"Courier" size:9];
+        _console.font = [UIFont fontWithName:@"Courier" size:8];
         _console.editable = NO; _console.selectable = YES;
         [self addSubview:_console];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
@@ -122,13 +114,12 @@
 }
 - (void)onLine:(NSNotification *)n {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *line = n.object;
-        self.console.text = [NSString stringWithFormat:@"%@%@", self.console.text, line];
+        self.console.text = [NSString stringWithFormat:@"%@%@", self.console.text, n.object];
         [self.console scrollRangeToVisible:NSMakeRange(self.console.text.length-1, 1)];
     });
 }
-- (void)copyAll { UIPasteboard.generalPasteboard.string = [KSLogger shared].allText; KS(@"[SYS] 已复制"); }
-- (void)clearAll { [[KSLogger shared] clear]; self.console.text = @""; KS(@"=== 已清空 ==="); }
+- (void)copyAll { UIPasteboard.generalPasteboard.string = [KSLogger shared].allText; }
+- (void)clearAll { [[KSLogger shared] clear]; self.console.text = @""; }
 - (void)drag:(UIPanGestureRecognizer *)g {
     CGPoint t = [g translationInView:self.superview];
     self.center = CGPointMake(self.center.x+t.x, self.center.y+t.y);
@@ -138,418 +129,220 @@
 
 static KSWindow *g_win = nil;
 
-#pragma mark - 崩溃捕获
+#pragma mark - 观察 Hook（不替换，只记录）
 
-static void ks_crash_handler(int sig, siginfo_t *info, void *ctx) {
-    KS(@"[CRASH] ⚠️ 信号: sig=%d addr=%p", sig, info->si_addr);
-    void *frames[32]; int n = backtrace(frames, 32);
-    char **syms = backtrace_symbols(frames, n);
-    for (int i = 0; i < n; i++) KS(@"  ↳ [%d] %s", i, syms[i]);
-    free(syms); signal(sig, SIG_DFL); raise(sig);
-}
-
-static void ks_exception_handler(NSException *e) {
-    KS(@"[CRASH] ⚠️ 异常: %@", e.name);
-    KS(@"[CRASH] Reason: %@", e.reason);
-    KS(@"[CRASH] Stack: %@", [e callStackSymbols]);
-}
-
-#pragma mark - 辅助
-
-static void logStack(int skip, int max) {
-    NSArray *syms = [NSThread callStackSymbols];
-    for (int i = skip+2; i < MIN((int)syms.count, skip+2+max); i++) KS(@"  ↳ %@", syms[i]);
-}
-
-static void injectFakeState(void) {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setObject:@"DP5372QRM1NK3L7" forKey:@"xTcAwvyFDr9CujLx"];
-    [ud setBool:YES forKey:@"kfun_activated"];
-    [ud setObject:@"2099-12-31T23:59:59Z" forKey:@"expire_date"];
-    [ud setObject:@"951951" forKey:@"appid"];
-    [ud synchronize];
-    KS(@"[FAKE] 已注入伪造验证状态");
-}
-
-static NSDictionary *buildFakeServerResponse(void) {
-    return @{
-        @"success": @YES,
-        @"message": @"激活成功",
-        @"data": @{
-            @"expires_at": @"2099-12-31T23:59:59Z",
-            @"expire": @"2099-12-31T23:59:59Z",
-            @"endtime": @"2099-12-31 23:59:59",
-            @"time": @"2099-12-31 23:59:59",
-            @"vip_time": @"2099-12-31 23:59:59",
-            @"status": @"active",
-            @"appid": @"951951",
-            @"action": @"activate"
-        },
-        @"status": @"success"
-    };
-}
-
-#pragma mark - 前向声明
-
-static void ks_initMainVC(void);
-
-#pragma mark - 保存原始 IMP
-
-static IMP g_orig_activateCode = NULL;
-static IMP g_orig_onTapVerify = NULL;
-static IMP g_orig_startContinuousAuthCheck = NULL;
-
-#pragma mark - Hook: activateCode:completion: (核心)
-
-// type encoding: v32@0:8@16@24
-static void kf_hooked_activateCode(id self, SEL _cmd, NSString *code, id completion) {
-    KS(@"[HOOK] ⭐ activateCode:completion: 拦截! code=%@", code);
-    logStack(0, 5);
-    injectFakeState();
-    
-    if (completion) {
-        void (^comp)(BOOL, id) = completion;
-        NSDictionary *resp = buildFakeServerResponse();
-        KS(@"[HOOK]   即将异步回调 completion(YES)");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            comp(YES, resp);
-            KS(@"[HOOK]   ✅ completion(YES, fakeResponse) 已调用");
-        });
-    } else {
-        KS(@"[HOOK]   ⚠️ completion 为 nil");
-    }
-}
-
-#pragma mark - Hook: onTapVerify (完全替换)
-
-// ⚡ 完全替换 onTapVerify，不调原始
-// 原始 onTapVerify 有15位校验 + 网络请求，会导致闪退
-// 我们直接: 注入假状态 → dismiss → 找 ViewController → 初始化
-static void kf_hooked_onTapVerify(id self, SEL _cmd) {
-    KS(@"[HOOK] ⭐ onTapVerify 拦截! 完全替换");
-    logStack(0, 5);
-    injectFakeState();
-    
-    // 不调原始 onTapVerify！
-    // 直接手动走后续流程
-    
-    UIViewController *actVC = (UIViewController *)self;
-    
-    // 1. 隐藏验证UI
-    @try {
-        UIView *mask = [actVC valueForKey:@"authMaskView"];
-        if (mask) { mask.hidden = YES; [mask removeFromSuperview]; KS(@"[INIT]   authMaskView 已移除"); }
-    } @catch (NSException *e) {}
-    
-    @try {
-        UIActivityIndicatorView *spinner = [actVC valueForKey:@"spinner"];
-        if (spinner) { [spinner stopAnimating]; spinner.hidden = YES; }
-    } @catch (NSException *e) {}
-    
-    // 2. 异步 dismiss + 初始化主页
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        KS(@"[INIT]   开始 dismiss...");
-        if (actVC.presentingViewController) {
-            [actVC dismissViewControllerAnimated:YES completion:^{
-                KS(@"[INIT]   ✅ dismiss 完成，开始初始化主页");
-                ks_initMainVC();
-            }];
-        } else {
-            KS(@"[INIT]   ⚠️ 无 presentingViewController，直接初始化");
-            ks_initMainVC();
-        }
-    });
-}
-
-#pragma mark - 追踪 Hook
-
-static IMP g_orig_radarCollectLoop = NULL;
-static IMP g_orig_radarPushLoop = NULL;
-static IMP g_orig_readLoop = NULL;
-static IMP g_orig_setup = NULL;
-
-// radarCollectLoop hook - 追踪
-static void kf_hooked_radarCollectLoop(id self, SEL _cmd) {
-    KS(@"[HOOK] ⭐ radarCollectLoop START");
-    logStack(0, 5);
-    if (g_orig_radarCollectLoop) {
-        ((void (*)(id, SEL))g_orig_radarCollectLoop)(self, _cmd);
-        KS(@"[HOOK]   radarCollectLoop 原始执行完毕");
-    }
-}
-
-// radarPushLoop hook - 追踪
-static void kf_hooked_radarPushLoop(id self, SEL _cmd) {
-    KS(@"[HOOK] ⭐ radarPushLoop START");
-    if (g_orig_radarPushLoop) {
-        ((void (*)(id, SEL))g_orig_radarPushLoop)(self, _cmd);
-        KS(@"[HOOK]   radarPushLoop 原始执行完毕");
-    }
-}
-
-// readLoop hook - 追踪
-static void kf_hooked_readLoop(id self, SEL _cmd) {
-    KS(@"[HOOK] ⭐ readLoop START");
-    if (g_orig_readLoop) {
-        ((void (*)(id, SEL))g_orig_readLoop)(self, _cmd);
-        KS(@"[HOOK]   readLoop 原始执行完毕");
-    }
-}
-
-// setup hook - 追踪
-static void kf_hooked_setup(id self, SEL _cmd) {
-    KS(@"[HOOK] ⭐ setup START");
-    logStack(0, 5);
-    if (g_orig_setup) {
-        ((void (*)(id, SEL))g_orig_setup)(self, _cmd);
-        KS(@"[HOOK]   setup 原始执行完毕");
-    }
-}
-
-static void kf_hooked_checkTask(id self, SEL _cmd) {
-    KS(@"[HOOK] ⭐ checkTask 拦截 — 跳过");
-}
-
-static void kf_hooked_startContinuousAuthCheck(id self, SEL _cmd) {
-    KS(@"[HOOK] ⭐ startContinuousAuthCheck 拦截 — 跳过");
-}
-
-#pragma mark - 主页初始化
-
-static void ks_initMainVC(void) {
-    Class mainClass = objc_getClass("ViewController");
-    if (!mainClass) {
-        KS(@"[INIT]   ❌ ViewController 类不存在");
-        return;
-    }
-    
-    // 在所有 window 中找 ViewController
-    __block id mainVC = nil;
-    for (UIWindow *window in [UIApplication sharedApplication].windows) {
-        UIViewController *root = window.rootViewController;
-        if ([root isKindOfClass:mainClass]) { mainVC = root; break; }
-        if ([root isKindOfClass:[UINavigationController class]]) {
-            UINavigationController *nav = (UINavigationController *)root;
-            for (UIViewController *vc in nav.viewControllers) {
-                if ([vc isKindOfClass:mainClass]) { mainVC = vc; break; }
-            }
-            if (!mainVC && [nav.topViewController isKindOfClass:mainClass]) mainVC = nav.topViewController;
-        }
-        if ([root isKindOfClass:[UITabBarController class]]) {
-            UITabBarController *tab = (UITabBarController *)root;
-            for (UIViewController *vc in tab.viewControllers) {
-                if ([vc isKindOfClass:mainClass]) { mainVC = vc; break; }
-                if ([vc isKindOfClass:[UINavigationController class]]) {
-                    UINavigationController *nav = (UINavigationController *)vc;
-                    for (UIViewController *nvc in nav.viewControllers) {
-                        if ([nvc isKindOfClass:mainClass]) { mainVC = nvc; break; }
-                    }
-                }
-            }
-        }
-    }
-    
-    // 也检查 presentedViewController
-    if (!mainVC) {
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            UIViewController *top = window.rootViewController;
-            while (top.presentedViewController) {
-                top = top.presentedViewController;
-                if ([top isKindOfClass:mainClass]) { mainVC = top; break; }
-            }
-            if (mainVC) break;
-        }
-    }
-    
-    if (!mainVC) {
-        KS(@"[INIT]   ❌ 未找到 ViewController，1秒后重试...");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            ks_initMainVC();
-        });
-        return;
-    }
-    
-    KS(@"[INIT]   ✅ 找到主页: %@", mainVC);
-    
-    // ⚡ 按正确顺序调用初始化链
-    // 正常流程: viewDidLoad → setup → setupAfterActivation → radarCollectLoop → radarPushLoop
-    
-    // 1. viewDidLoad
-    @try {
-        if ([mainVC respondsToSelector:@selector(viewDidLoad)]) {
-            [mainVC performSelector:@selector(viewDidLoad)];
-            KS(@"[INIT]   ✅ viewDidLoad 已调用");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ viewDidLoad 异常: %@", e.reason); }
-    
-    // 2. setup
-    @try {
-        if ([mainVC respondsToSelector:@selector(setup)]) {
-            [mainVC performSelector:@selector(setup)];
-            KS(@"[INIT]   ✅ setup 已调用");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ setup 异常: %@", e.reason); }
-    
-    // 3. setupAfterActivation
-    @try {
-        if ([mainVC respondsToSelector:@selector(setupAfterActivation)]) {
-            [mainVC performSelector:@selector(setupAfterActivation)];
-            KS(@"[INIT]   ✅ setupAfterActivation 已调用");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ setupAfterActivation 异常: %@", e.reason); }
-    
-    // 调用 setupBackgroundKeepAlive
-    @try {
-        if ([mainVC respondsToSelector:@selector(setupBackgroundKeepAlive)]) {
-            [mainVC performSelector:@selector(setupBackgroundKeepAlive)];
-            KS(@"[INIT]   ✅ setupBackgroundKeepAlive 已调用");
-        }
-    } @catch (NSException *e) {}
-    
-    // 调用 radarCollectLoop（收集数据）
-    @try {
-        if ([mainVC respondsToSelector:@selector(radarCollectLoop)]) {
-            [mainVC performSelector:@selector(radarCollectLoop)];
-            KS(@"[INIT]   ✅ radarCollectLoop 已调用");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ radarCollectLoop 异常: %@", e.reason); }
-    
-    // 调用 radarPushLoop（推送数据到前端）
-    @try {
-        if ([mainVC respondsToSelector:@selector(radarPushLoop)]) {
-            [mainVC performSelector:@selector(radarPushLoop)];
-            KS(@"[INIT]   ✅ radarPushLoop 已调用");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ radarPushLoop 异常: %@", e.reason); }
-    
-    // 调用 readLoop（读取循环）
-    @try {
-        if ([mainVC respondsToSelector:@selector(readLoop)]) {
-            [mainVC performSelector:@selector(readLoop)];
-            KS(@"[INIT]   ✅ readLoop 已调用");
-        }
-    } @catch (NSException *e) { KS(@"[INIT]   ❌ readLoop 异常: %@", e.reason); }
-    
-    // 刷新 tableView
-    @try {
-        id tv = [mainVC valueForKey:@"tableView"];
-        if (tv && [tv isKindOfClass:[UITableView class]]) {
-            [(UITableView *)tv reloadData];
-            KS(@"[INIT]   ✅ tableView reloadData");
-        }
-    } @catch (NSException *e) {}
-    
-    // 隐藏 authMaskView（如果主页也有）
-    @try {
-        UIView *mask = [mainVC valueForKey:@"authMaskView"];
-        if (mask) { mask.hidden = YES; [mask removeFromSuperview]; KS(@"[INIT]   主页 authMaskView 已移除"); }
-    } @catch (NSException *e) {}
-    
-    KS(@"[INIT]   ✅ 主页初始化完成");
-}
-
-#pragma mark - Hook 安装
-
-static void installHook(Class cls, SEL sel, IMP newImp, IMP *origOut, const char *label) {
+// 通用观察 hook：调用原始方法，前后打日志
+static void makeSpyHook(Class cls, SEL sel, const char *label) {
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) {
-        KS(@"[HOOK] ❌ %s.%s not found (%s)", class_getName(cls), sel_getName(sel), label);
-        return;
+    if (!m) return;
+    
+    IMP origIMP = method_getImplementation(m);
+    const char *typeEnc = method_getTypeEncoding(m);
+    
+    // 根据 type encoding 创建合适的 spy block
+    // 常见: v16@0:8 (无参), v24@0:8@16 (一个id参数), v32@0:8@16@24 (两个id参数)
+    NSString *enc = [NSString stringWithUTF8String:typeEnc ?: ""];
+    
+    if ([enc hasPrefix:@"v16@0:8"]) {
+        // void(void) - 无参数
+        IMP spyIMP = imp_implementationWithBlock(^(id self) {
+            KS(@"[👁] %s.%s START", class_getName(cls), sel_getName(sel));
+            ((void (*)(id, SEL))origIMP)(self, sel);
+            KS(@"[👁] %s.%s END", class_getName(cls), sel_getName(sel));
+        });
+        method_setImplementation(m, spyIMP);
+    } else if ([enc hasPrefix:@"v24@0:8@16"]) {
+        // void(id) - 一个id参数
+        IMP spyIMP = imp_implementationWithBlock(^(id self, id arg) {
+            NSString *argDesc = [arg respondsToSelector:@selector(description)] ? [arg description] : @"<non-desc>";
+            if (argDesc.length > 200) argDesc = [argDesc substringToIndex:200];
+            KS(@"[👁] %s.%s arg=%@", class_getName(cls), sel_getName(sel), argDesc);
+            ((void (*)(id, SEL, id))origIMP)(self, sel, arg);
+            KS(@"[👁] %s.%s END", class_getName(cls), sel_getName(sel));
+        });
+        method_setImplementation(m, spyIMP);
+    } else if ([enc hasPrefix:@"v32@0:8@16@24"]) {
+        // void(id, id) - 两个id参数（如 activateCode:completion:）
+        IMP spyIMP = imp_implementationWithBlock(^(id self, id arg1, id arg2) {
+            NSString *a1 = [arg1 respondsToSelector:@selector(description)] ? [arg1 description] : @"<non-desc>";
+            if (a1.length > 200) a1 = [a1 substringToIndex:200];
+            KS(@"[👁] %s.%s arg1=%@ arg2=%@", class_getName(cls), sel_getName(sel), a1, [arg2 class]);
+            ((void (*)(id, SEL, id, id))origIMP)(self, sel, arg1, arg2);
+            KS(@"[👁] %s.%s END", class_getName(cls), sel_getName(sel));
+        });
+        method_setImplementation(m, spyIMP);
+    } else if ([enc hasPrefix:@"B16@0:8"]) {
+        // BOOL(void)
+        IMP spyIMP = imp_implementationWithBlock(^BOOL(id self) {
+            KS(@"[👁] %s.%s START", class_getName(cls), sel_getName(sel));
+            BOOL result = ((BOOL (*)(id, SEL))origIMP)(self, sel);
+            KS(@"[👁] %s.%s → %d", class_getName(cls), sel_getName(sel), result);
+            return result;
+        });
+        method_setImplementation(m, spyIMP);
+    } else if ([enc hasPrefix:@"@16@0:8"]) {
+        // id(void)
+        IMP spyIMP = imp_implementationWithBlock(^id(id self) {
+            KS(@"[👁] %s.%s START", class_getName(cls), sel_getName(sel));
+            id result = ((id (*)(id, SEL))origIMP)(self, sel);
+            KS(@"[👁] %s.%s → %@", class_getName(cls), sel_getName(sel), result);
+            return result;
+        });
+        method_setImplementation(m, spyIMP);
+    } else {
+        // 未知签名，只记录调用
+        KS(@"[SPY] ⚠️ %s.%s 未知签名: %s", class_getName(cls), sel_getName(sel), typeEnc ?: "?");
     }
-    IMP current = method_getImplementation(m);
-    if (origOut) *origOut = current;
-    method_setImplementation(m, newImp);
-    KS(@"[HOOK] ✅ %s.%s hooked (%s) origIMP=%p", class_getName(cls), sel_getName(sel), label, current);
+    
+    KS(@"[SPY] ✅ %s.%s 已安装观察 (type=%s)", class_getName(cls), sel_getName(sel), typeEnc ?: "?");
+}
+
+#pragma mark - 网络请求观察
+
+// swizzle NSURLSession dataTaskWithRequest:completionHandler:
+static void spyNetwork(void) {
+    Class cls = [NSURLSession class];
+    SEL sel = @selector(dataTaskWithRequest:completionHandler:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) { KS(@"[SPY] ⚠️ dataTaskWithRequest: not found"); return; }
+    
+    IMP origIMP = method_getImplementation(m);
+    IMP spyIMP = imp_implementationWithBlock(^(id self, NSURLRequest *req, void(^completion)(NSData*, NSURLResponse*, NSError*)) {
+        NSString *url = req.URL.absoluteString;
+        NSString *method = req.HTTPMethod ?: @"GET";
+        NSData *body = req.HTTPBody;
+        NSString *bodyStr = body ? [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] : @"(nil)";
+        if (bodyStr.length > 500) bodyStr = [bodyStr substringToIndex:500];
+        
+        KS(@"[NET] %@ %@", method, url);
+        if (body) KS(@"[NET]   body=%@", bodyStr);
+        for (NSString *key in req.allHTTPHeaderFields) {
+            KS(@"[NET]   header: %@ = %@", key, req.allHTTPHeaderFields[key]);
+        }
+        
+        // 包装 completion 打印响应
+        void(^wrappedCompletion)(NSData*, NSURLResponse*, NSError*) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)resp;
+            NSString *respStr = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"(nil)";
+            if (respStr.length > 500) respStr = [respStr substringToIndex:500];
+            KS(@"[NET]   ← %ld err=%@", (long)httpResp.statusCode, err.localizedDescription ?: @"(nil)");
+            KS(@"[NET]   ← body=%@", respStr);
+            if (completion) completion(data, resp, err);
+        };
+        
+        return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest*, void(^)(NSData*, NSURLResponse*, NSError*)))origIMP)(self, sel, req, wrappedCompletion);
+    });
+    method_setImplementation(m, spyIMP);
+    KS(@"[SPY] ✅ NSURLSession.dataTaskWithRequest: 已安装网络观察");
 }
 
 #pragma mark - 全局扫描
 
-static void scanAllClasses(void) {
-    KS(@"[SCAN] === 全局扫描 ===");
+static void scanAll(void) {
+    KS(@"[SCAN] === 全局扫描所有类的方法 ===");
     int numClasses = objc_getClassList(NULL, 0);
     Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
     objc_getClassList(classes, numClasses);
+    
     for (int i = 0; i < numClasses; i++) {
-        unsigned int mc = 0;
-        Method *methods = class_copyMethodList(classes[i], &mc);
-        if (!methods) continue;
-        for (unsigned int j = 0; j < mc; j++) {
-            NSString *name = NSStringFromSelector(method_getName(methods[j]));
-            if ([name isEqualToString:@"activateCode:completion:"] ||
-                [name isEqualToString:@"onTapVerify"] ||
-                [name isEqualToString:@"checkTask"] ||
-                [name isEqualToString:@"radarCollectLoop"] ||
-                [name isEqualToString:@"setupAfterActivation"] ||
-                [name isEqualToString:@"startContinuousAuthCheck"] ||
-                [name isEqualToString:@"onVerify"]) {
-                KS(@"[SCAN]   %s → %@", class_getName(classes[i]), name);
+        const char *name = class_getName(classes[i]);
+        // 只扫描 app 相关的类
+        if (strstr(name, "WWW") || strstr(name, "ViewController") || 
+            strstr(name, "RunInBackground") || strstr(name, "Activation") ||
+            strstr(name, "Auth") || strstr(name, "Radar") || strstr(name, "Encryption")) {
+            unsigned int mc = 0;
+            Method *methods = class_copyMethodList(classes[i], &mc);
+            if (!methods) continue;
+            KS(@"[SCAN] %s (%d methods):", name, mc);
+            for (unsigned int j = 0; j < mc; j++) {
+                SEL sel = method_getName(methods[j]);
+                const char *typeEnc = method_getTypeEncoding(methods[j]);
+                KS(@"[SCAN]   %s (%s)", sel_getName(sel), typeEnc ?: "?");
             }
+            free(methods);
         }
-        free(methods);
     }
     free(classes);
-    KS(@"[SCAN] === 完成 ===");
+    KS(@"[SCAN] === 扫描完成 ===");
 }
 
 #pragma mark - 构造函数
 
 __attribute__((constructor))
 static void ks_init(void) {
-    NSLog(@"========================================");
-    NSLog(@"[KfunSolo] v5 - Final");
-    NSLog(@"========================================");
-    
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         g_win = [[KSWindow alloc] init];
-        
-        KS(@"=== KfunSolo v5-final 启动 ===");
-        KS(@"策略: 完全替换 onTapVerify + hook activateCode");
+        KS(@"=== KfunSpy 纯观察版启动 ===");
+        KS(@"用正确卡密验证一次，记录完整流程");
         KS(@"");
         
-        // 崩溃捕获
-        struct sigaction sa;
-        sa.sa_sigaction = ks_crash_handler;
-        sa.sa_flags = SA_SIGINFO;
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGSEGV, &sa, NULL);
-        sigaction(SIGBUS, &sa, NULL);
-        sigaction(SIGILL, &sa, NULL);
-        sigaction(SIGABRT, &sa, NULL);
-        NSSetUncaughtExceptionHandler(ks_exception_handler);
-        KS(@"[INIT] 崩溃捕获已启用");
+        // 全局扫描
+        scanAll();
         
-        scanAllClasses();
+        // 安装网络观察
+        spyNetwork();
         
-        // Hook WWWActivationViewController
+        // 观察 WWWActivationViewController 的关键方法
         Class actVC = objc_getClass("WWWActivationViewController");
-        KS(@"[INIT] WWWActivationViewController: %s", actVC ? "✅" : "❌");
         if (actVC) {
-            installHook(actVC, @selector(onTapVerify), (IMP)kf_hooked_onTapVerify, &g_orig_onTapVerify, "完全替换");
-            installHook(actVC, @selector(activateCode:completion:), (IMP)kf_hooked_activateCode, NULL, "备用");
-            installHook(actVC, @selector(checkTask), (IMP)kf_hooked_checkTask, NULL, "防验证");
+            KS(@"[SPY] --- 观察 WWWActivationViewController ---");
+            makeSpyHook(actVC, @selector(onTapVerify), "tap");
+            makeSpyHook(actVC, @selector(onVerify), "verify_block");
+            makeSpyHook(actVC, @selector(setOnVerify:), "set_verify_block");
+            makeSpyHook(actVC, @selector(prefillCode:), "prefill");
+            makeSpyHook(actVC, @selector(viewDidLoad), "lifecycle");
+            makeSpyHook(actVC, @selector(viewDidAppear:), "lifecycle");
         }
         
-        // Hook WWWActivation
+        // 观察 WWWActivation
         Class activation = objc_getClass("WWWActivation");
-        KS(@"[INIT] WWWActivation: %s", activation ? "✅" : "❌");
         if (activation) {
-            installHook(activation, @selector(activateCode:completion:), (IMP)kf_hooked_activateCode, &g_orig_activateCode, "核心");
+            KS(@"[SPY] --- 观察 WWWActivation ---");
+            makeSpyHook(activation, @selector(activateCode:completion:), "activate");
+            makeSpyHook(activation, @selector(activationStampPath), "stamp");
         }
         
-        // Hook ViewController
+        // 观察 ViewController
         Class mainVC = objc_getClass("ViewController");
-        KS(@"[INIT] ViewController: %s", mainVC ? "✅" : "❌");
         if (mainVC) {
-            installHook(mainVC, @selector(checkTask), (IMP)kf_hooked_checkTask, NULL, "防验证");
-            installHook(mainVC, @selector(startContinuousAuthCheck), (IMP)kf_hooked_startContinuousAuthCheck, &g_orig_startContinuousAuthCheck, "防验证");
-            // 追踪数据层方法
-            installHook(mainVC, @selector(setup), (IMP)kf_hooked_setup, &g_orig_setup, "追踪");
-            installHook(mainVC, @selector(radarCollectLoop), (IMP)kf_hooked_radarCollectLoop, &g_orig_radarCollectLoop, "追踪");
-            installHook(mainVC, @selector(radarPushLoop), (IMP)kf_hooked_radarPushLoop, &g_orig_radarPushLoop, "追踪");
-            installHook(mainVC, @selector(readLoop), (IMP)kf_hooked_readLoop, &g_orig_readLoop, "追踪");
+            KS(@"[SPY] --- 观察 ViewController ---");
+            makeSpyHook(mainVC, @selector(viewDidLoad), "lifecycle");
+            makeSpyHook(mainVC, @selector(viewDidAppear:), "lifecycle");
+            makeSpyHook(mainVC, @selector(setupAfterActivation), "setup");
+            makeSpyHook(mainVC, @selector(setupBackgroundKeepAlive), "bg");
+            makeSpyHook(mainVC, @selector(startContinuousAuthCheck), "auth");
+            makeSpyHook(mainVC, @selector(startRunInbackGround), "bg");
+            makeSpyHook(mainVC, @selector(radarCollectLoop), "radar");
+            makeSpyHook(mainVC, @selector(radarPushLoop), "radar");
+            makeSpyHook(mainVC, @selector(readLoop), "read");
+            makeSpyHook(mainVC, @selector(checkTask), "check");
+            makeSpyHook(mainVC, @selector(authMaskView), "auth");
+            makeSpyHook(mainVC, @selector(setAuthMaskView:), "auth");
         }
         
-        KS(@"[INIT] ✅ Hook 安装完成，点击验证即可...");
+        // 观察 RunInBackground
+        Class runBG = objc_getClass("RunInBackground");
+        if (runBG) {
+            KS(@"[SPY] --- 观察 RunInBackground ---");
+            makeSpyHook(runBG, @selector(checkTask), "check");
+        }
+        
+        // 观察 AppDelegate
+        Class appDelegate = objc_getClass("AppDelegate");
+        if (appDelegate) {
+            KS(@"[SPY] --- 观察 AppDelegate ---");
+            makeSpyHook(appDelegate, @selector(application:didFinishLaunchingWithOptions:), "launch");
+        }
+        
+        // 观察 SceneDelegate
+        Class sceneDelegate = objc_getClass("SceneDelegate");
+        if (sceneDelegate) {
+            KS(@"[SPY] --- 观察 SceneDelegate ---");
+            makeSpyHook(sceneDelegate, @selector(scene:willConnectToSession:options:), "scene");
+        }
+        
+        KS(@"[SPY] ✅ 所有观察点已安装");
+        KS(@"[SPY] 现在用正确卡密验证...");
     });
 }
 
